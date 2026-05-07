@@ -1,50 +1,49 @@
 version: "3.8"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WhatsApp Transcription System
+# WhatsApp Transcription System — integrates with existing wa_llm stack
 #
 # CPU: Intel Xeon E-2124 — 4 cores / 4 threads (NO hyperthreading)
 #      Base 3.3 GHz / Turbo 4.3 GHz / TDP 71W / AVX2 ✓
 #
-# CPU pinning strategy:
-#   CPU 0       → infra (evolution-api, redis, postgres, celery-beat)
+# CPU pinning:
+#   CPU 0       → infra (redis, celery-beat, metabase)
 #   CPUs 1,2,3  → transcription workload (api + celery-worker + whisper)
-#   Metabase    → unpinned (admin-only, runs rarely, Java needs burst headroom)
 #
-# WHISPER_THREADS=3: matches 3 dedicated physical cores exactly.
-# Thermal note: Whisper on 3 cores at turbo (4.3 GHz) approaches 71W TDP.
-# If lm-sensors shows throttling, lower WHISPER_THREADS to 2 in .env.
+# REUSES from existing wa_llm stack (must be running first):
+#   - wa_llm_postgres  (pgvector/pgvector:pg16) — saves RAM, pgvector included
+#   - wa_llm_whatsapp  (go-whatsapp-web-multidevice) — WhatsApp client
+#   - wa_llm_net       — shared internal Docker network
 #
-# Security: postgres and redis are on transcription_net only — no external exposure.
-# All external traffic routes through Caddy with TLS + basicauth where needed.
+# Webhook flow:
+#   go-whatsapp → n8n:5678/webhook/whatsapp
+#   n8n routes: audio → transcription-api, everything else → wa_llm:5001
+#
+# One-time DB setup (run once before first start):
+#   docker exec -it wa_llm_postgres psql -U wa_llm_user -d wa_llm \
+#     -c "CREATE DATABASE transcriptions;"
+#   docker exec -it wa_llm_postgres psql -U wa_llm_user \
+#     -c "GRANT ALL ON DATABASE transcriptions TO wa_llm_user;"
 #
 # Audio retention:
-#   audio_temp  → deleted after each job (safety-net cleanup at 3:30 AM)
-#   audio_store → kept for AUDIO_RETENTION_DAYS, deleted by Celery Beat at 3:00 AM
+#   audio_temp  → deleted after each job
+#   audio_store → kept AUDIO_RETENTION_DAYS days, cleaned by Celery Beat at 3 AM
 #
-# Model upgrade:
-#   WHISPER_MODEL=medium         (default, 769MB, ~15s/min audio on E-2124)
-#   WHISPER_MODEL=ivrit-ai/...   only if medium accuracy insufficient (~60s/min)
-#   Change WORKER_MEM_LIMIT to 3g if switching to large-v3
+# Model:
+#   WHISPER_MODEL=medium  (~15s/min on E-2124, 769MB RAM)
+#   If throttling: lower WHISPER_THREADS to 2 in .env
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
-  transcription_net:
-    driver: bridge
-    internal: false   # needs internet for model download on first start
+  wa_llm_net:
+    external: true   # join existing wa_llm network
   proxy:
-    external: true    # Caddy's existing bridge network
+    external: true   # Caddy's existing bridge network
 
 volumes:
   redis_data:
     driver: local
-    driver_opts: {type: none, o: bind, device: "${APPDATA_PATH}/redis/data"}
-  postgres_data:
-    driver: local
-    driver_opts: {type: none, o: bind, device: "${APPDATA_PATH}/postgres/data"}
-  evolution_data:
-    driver: local
-    driver_opts: {type: none, o: bind, device: "${APPDATA_PATH}/evolution-api"}
+    driver_opts: {type: none, o: bind, device: "${APPDATA_PATH}/transcription/redis"}
   models_cache:
     driver: local
     driver_opts: {type: none, o: bind, device: "${APPDATA_PATH}/transcription/models"}
@@ -60,47 +59,14 @@ volumes:
 
 services:
 
-  # ─── WhatsApp Bridge ───────────────────────────────────────────────────────
-  evolution-api:
-    image: atendai/evolution-api:v2-latest
-    container_name: evolution-api
-    restart: unless-stopped
-    networks:
-      - transcription_net
-      - proxy
-    volumes:
-      - evolution_data:/evolution/instances
-    environment:
-      SERVER_URL: "https://${EVOLUTION_DOMAIN}"
-      AUTHENTICATION_TYPE: apikey
-      AUTHENTICATION_API_KEY: "${EVOLUTION_API_KEY}"
-      WEBHOOK_GLOBAL_ENABLED: "true"
-      WEBHOOK_GLOBAL_URL: "http://n8n:5678/webhook/whatsapp"
-      WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS: "false"
-      QRCODE_LIMIT: "30"
-      DATABASE_ENABLED: "false"
-      RABBITMQ_ENABLED: "false"
-      REDIS_ENABLED: "false"
-      LOG_LEVEL: ERROR
-    mem_limit: 512m
-    cpuset: "0"
-    labels:
-      caddy: "${EVOLUTION_DOMAIN}"
-      caddy.reverse_proxy: "{{upstreams 8080}}"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # ─── Redis (broker + rate-limit store) ────────────────────────────────────
-  # Not exposed externally — transcription_net only.
-  redis:
+  # ─── Redis (Celery broker + rate-limit cache) ──────────────────────────────
+  # Not in existing stack — added here.
+  transcription-redis:
     image: redis:7-alpine
     container_name: transcription-redis
     restart: unless-stopped
     networks:
-      - transcription_net
+      - wa_llm_net
     volumes:
       - redis_data:/data
     command: >
@@ -117,28 +83,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─── PostgreSQL ───────────────────────────────────────────────────────────
-  # Not exposed externally — transcription_net only.
-  postgres:
-    image: postgres:16-alpine
-    container_name: transcription-postgres
-    restart: unless-stopped
-    networks:
-      - transcription_net
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    environment:
-      POSTGRES_DB: transcriptions
-      POSTGRES_USER: "${POSTGRES_USER}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
-    mem_limit: 300m
-    cpuset: "0"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d transcriptions"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   # ─── Transcription API ────────────────────────────────────────────────────
   transcription-api:
     build:
@@ -148,15 +92,16 @@ services:
     container_name: transcription-api
     restart: unless-stopped
     networks:
-      - transcription_net
+      - wa_llm_net
       - proxy
     volumes:
       - models_cache:/app/models
       - audio_temp:/app/audio_temp
       - audio_store:/app/audio_store
     environment:
-      REDIS_URL: "redis://redis:6379/0"
-      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/transcriptions"
+      REDIS_URL: "redis://transcription-redis:6379/0"
+      # Uses existing wa_llm_postgres, separate 'transcriptions' database
+      DATABASE_URL: "postgresql://${WA_POSTGRES_USER}:${WA_POSTGRES_PASSWORD}@wa_llm_postgres/transcriptions"
       WHISPER_MODEL: "${WHISPER_MODEL:-medium}"
       WHISPER_COMPUTE_TYPE: "${WHISPER_COMPUTE_TYPE:-int8}"
       WHISPER_THREADS: "${WHISPER_THREADS:-3}"
@@ -173,9 +118,7 @@ services:
     mem_limit: 512m
     cpuset: "1,2,3"
     depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
+      transcription-redis:
         condition: service_healthy
     labels:
       caddy: "${TRANSCRIPTION_DOMAIN}"
@@ -187,20 +130,20 @@ services:
       retries: 3
       start_period: 20s
 
-  # ─── Celery Worker (transcription) ────────────────────────────────────────
+  # ─── Celery Worker ────────────────────────────────────────────────────────
   celery-worker:
     image: transcription-service:local
     container_name: transcription-worker
     restart: unless-stopped
     networks:
-      - transcription_net
+      - wa_llm_net
     volumes:
       - models_cache:/app/models
       - audio_temp:/app/audio_temp
       - audio_store:/app/audio_store
     environment:
-      REDIS_URL: "redis://redis:6379/0"
-      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/transcriptions"
+      REDIS_URL: "redis://transcription-redis:6379/0"
+      DATABASE_URL: "postgresql://${WA_POSTGRES_USER}:${WA_POSTGRES_PASSWORD}@wa_llm_postgres/transcriptions"
       WHISPER_MODEL: "${WHISPER_MODEL:-medium}"
       WHISPER_COMPUTE_TYPE: "${WHISPER_COMPUTE_TYPE:-int8}"
       WHISPER_THREADS: "${WHISPER_THREADS:-3}"
@@ -216,28 +159,25 @@ services:
       --concurrency=1
       --prefetch-multiplier=1
       -Q transcription
-    # medium: 1500m | large-v3: 3g
     mem_limit: "${WORKER_MEM_LIMIT:-1500m}"
     cpuset: "1,2,3"
     depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
+      transcription-redis:
         condition: service_healthy
 
-  # ─── Celery Beat (scheduled tasks) ────────────────────────────────────────
+  # ─── Celery Beat (scheduler) ──────────────────────────────────────────────
   celery-beat:
     image: transcription-service:local
     container_name: transcription-beat
     restart: unless-stopped
     networks:
-      - transcription_net
+      - wa_llm_net
     volumes:
       - audio_store:/app/audio_store
       - audio_temp:/app/audio_temp
     environment:
-      REDIS_URL: "redis://redis:6379/0"
-      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/transcriptions"
+      REDIS_URL: "redis://transcription-redis:6379/0"
+      DATABASE_URL: "postgresql://${WA_POSTGRES_USER}:${WA_POSTGRES_PASSWORD}@wa_llm_postgres/transcriptions"
       AUDIO_TEMP_DIR: /app/audio_temp
       AUDIO_STORE_DIR: /app/audio_store
       AUDIO_RETENTION_DAYS: "${AUDIO_RETENTION_DAYS:-30}"
@@ -248,15 +188,15 @@ services:
     depends_on:
       - celery-worker
 
-  # ─── Metabase (Admin Analytics Dashboard) ─────────────────────────────────
-  # Access: https://${METABASE_DOMAIN} — protected by Caddy basicauth
-  # First-run setup wizard runs at port 3000.
+  # ─── Metabase (Admin Analytics) ───────────────────────────────────────────
+  # Connects to existing wa_llm_postgres — can query both wa_llm and
+  # transcriptions databases from one dashboard.
   metabase:
     image: metabase/metabase:latest
     container_name: transcription-metabase
     restart: unless-stopped
     networks:
-      - transcription_net
+      - wa_llm_net
       - proxy
     volumes:
       - metabase_data:/metabase-data
@@ -264,17 +204,15 @@ services:
       MB_DB_TYPE: postgres
       MB_DB_DBNAME: transcriptions
       MB_DB_PORT: "5432"
-      MB_DB_USER: "${POSTGRES_USER}"
-      MB_DB_PASS: "${POSTGRES_PASSWORD}"
-      MB_DB_HOST: postgres
+      MB_DB_USER: "${WA_POSTGRES_USER}"
+      MB_DB_PASS: "${WA_POSTGRES_PASSWORD}"
+      MB_DB_HOST: wa_llm_postgres
       JAVA_TIMEZONE: Asia/Jerusalem
       MB_SEND_EMAIL_ON_FIRST_LOGIN_FROM_NEW_DEVICE: "false"
     mem_limit: 600m
-    # No cpuset — Metabase is admin-only and runs rarely. Java needs burst
-    # headroom for query execution. Unpinned so it doesn't fight infra on CPU 0.
+    # Unpinned — admin-only, Java needs burst headroom for queries
     depends_on:
-      postgres:
-        condition: service_healthy
+      - transcription-redis
     labels:
       caddy: "${METABASE_DOMAIN}"
       caddy.reverse_proxy: "{{upstreams 3000}}"
