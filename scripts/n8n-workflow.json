@@ -1,0 +1,158 @@
+{
+  "name": "WhatsApp Voice Transcription",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-whatsapp",
+      "name": "Webhook: WhatsApp",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {"caseSensitive": true},
+          "conditions": [
+            {
+              "leftValue": "={{ $json.body.data.messageType }}",
+              "rightValue": "audioMessage",
+              "operator": {"type": "string", "operation": "equals"}
+            }
+          ]
+        }
+      },
+      "id": "filter-audio",
+      "name": "Is Audio Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"ok\": true}"
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [460, 480]
+    },
+    {
+      "parameters": {
+        "url": "=http://evolution-api:8080/chat/getBase64FromMediaMessage/{{ $json.body.data.key.remoteJid.split('@')[0] }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}"}
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {"name": "message", "value": "={{ $json.body.data }}"},
+            {"name": "convertToMp4", "value": false}
+          ]
+        },
+        "options": {"response": {"response": {"responseFormat": "json"}}}
+      },
+      "id": "download-audio",
+      "name": "Download Audio (base64)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://transcription-api:8000/transcribe",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {"name": "audio", "value": "={{ $json.base64 }}", "parameterType": "formBinaryData"},
+            {"name": "sender_id", "value": "={{ $('Webhook: WhatsApp').item.json.body.data.key.remoteJid }}"},
+            {"name": "callback_url", "value": "http://n8n:5678/webhook/transcription-callback"},
+            {"name": "language", "value": "auto"}
+          ]
+        },
+        "options": {"timeout": 10000}
+      },
+      "id": "submit-transcription",
+      "name": "Submit Transcription",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "transcription-callback",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-callback",
+      "name": "Webhook: Callback",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 600]
+    },
+    {
+      "parameters": {
+        "url": "=http://evolution-api:8080/message/sendText/whatsapp-bot",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}"},
+            {"name": "Content-Type", "value": "application/json"}
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {"name": "number", "value": "={{ $json.body.sender_id }}"},
+            {"name": "text", "value": "=📝 *תמלול:*\n\n{{ $json.body.text }}"},
+            {"name": "delay", "value": 500}
+          ]
+        },
+        "options": {}
+      },
+      "id": "send-reply",
+      "name": "Send Transcription Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 600]
+    }
+  ],
+  "connections": {
+    "Webhook: WhatsApp": {
+      "main": [[{"node": "Is Audio Message?", "type": "main", "index": 0}]]
+    },
+    "Is Audio Message?": {
+      "main": [
+        [{"node": "Download Audio (base64)", "type": "main", "index": 0}],
+        [{"node": "Respond OK", "type": "main", "index": 0}]
+      ]
+    },
+    "Download Audio (base64)": {
+      "main": [[{"node": "Submit Transcription", "type": "main", "index": 0}]]
+    },
+    "Webhook: Callback": {
+      "main": [[{"node": "Send Transcription Reply", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": ["whatsapp", "transcription"],
+  "_comment": "Import this file into n8n via Settings > Import Workflow. Set EVOLUTION_API_KEY in n8n environment variables."
+}
