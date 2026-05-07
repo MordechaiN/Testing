@@ -3,9 +3,17 @@ version: "3.8"
 # ─────────────────────────────────────────────────────────────────────────────
 # WhatsApp Transcription System
 #
-# CPU pinning strategy (4-core Xeon):
-#   CPU 0       → infra (evolution-api, redis, postgres, metabase, beat)
-#   CPUs 1,2,3  → transcription workload (api + worker)
+# CPU: Intel Xeon E-2124 — 4 cores / 4 threads (NO hyperthreading)
+#      Base 3.3 GHz / Turbo 4.3 GHz / TDP 71W / AVX2 ✓
+#
+# CPU pinning strategy:
+#   CPU 0       → infra (evolution-api, redis, postgres, celery-beat)
+#   CPUs 1,2,3  → transcription workload (api + celery-worker + whisper)
+#   Metabase    → unpinned (admin-only, runs rarely, Java needs burst headroom)
+#
+# WHISPER_THREADS=3: matches 3 dedicated physical cores exactly.
+# Thermal note: Whisper on 3 cores at turbo (4.3 GHz) approaches 71W TDP.
+# If lm-sensors shows throttling, lower WHISPER_THREADS to 2 in .env.
 #
 # Security: postgres and redis are on transcription_net only — no external exposure.
 # All external traffic routes through Caddy with TLS + basicauth where needed.
@@ -15,9 +23,9 @@ version: "3.8"
 #   audio_store → kept for AUDIO_RETENTION_DAYS, deleted by Celery Beat at 3:00 AM
 #
 # Model upgrade:
-#   WHISPER_MODEL=medium         (default, 769MB, 13-20s/min audio)
-#   WHISPER_MODEL=ivrit-ai/...   only if medium accuracy is insufficient
-#   Change worker mem_limit to 3g if switching to large-v3
+#   WHISPER_MODEL=medium         (default, 769MB, ~15s/min audio on E-2124)
+#   WHISPER_MODEL=ivrit-ai/...   only if medium accuracy insufficient (~60s/min)
+#   Change WORKER_MEM_LIMIT to 3g if switching to large-v3
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
@@ -262,7 +270,8 @@ services:
       JAVA_TIMEZONE: Asia/Jerusalem
       MB_SEND_EMAIL_ON_FIRST_LOGIN_FROM_NEW_DEVICE: "false"
     mem_limit: 600m
-    cpuset: "0"
+    # No cpuset — Metabase is admin-only and runs rarely. Java needs burst
+    # headroom for query execution. Unpinned so it doesn't fight infra on CPU 0.
     depends_on:
       postgres:
         condition: service_healthy
