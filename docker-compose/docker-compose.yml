@@ -2,61 +2,53 @@ version: "3.8"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WhatsApp Transcription System
-# Deploy path: ${COMPOSE_PATH}/docker-compose.yml
 #
-# CPU pinning strategy:
-#   CPU 0       → infra (evolution-api, redis, postgres, metabase)
+# CPU pinning strategy (4-core Xeon):
+#   CPU 0       → infra (evolution-api, redis, postgres, metabase, beat)
 #   CPUs 1,2,3  → transcription workload (api + worker)
 #
-# Upgrade path for model:
-#   WHISPER_MODEL=medium          (default, ~769MB RAM, 13-20s/min)
-#   WHISPER_MODEL=ivrit-ai/whisper-large-v3  (only if accuracy insufficient)
-#   mem_limit for worker: 1500m (medium) / 3g (large-v3)
+# Security: postgres and redis are on transcription_net only — no external exposure.
+# All external traffic routes through Caddy with TLS + basicauth where needed.
+#
+# Audio retention:
+#   audio_temp  → deleted after each job (safety-net cleanup at 3:30 AM)
+#   audio_store → kept for AUDIO_RETENTION_DAYS, deleted by Celery Beat at 3:00 AM
+#
+# Model upgrade:
+#   WHISPER_MODEL=medium         (default, 769MB, 13-20s/min audio)
+#   WHISPER_MODEL=ivrit-ai/...   only if medium accuracy is insufficient
+#   Change worker mem_limit to 3g if switching to large-v3
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
   transcription_net:
     driver: bridge
+    internal: false   # needs internet for model download on first start
   proxy:
-    external: true   # Caddy's existing network
+    external: true    # Caddy's existing bridge network
 
 volumes:
   redis_data:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${APPDATA_PATH}/redis/data
+    driver_opts: {type: none, o: bind, device: "${APPDATA_PATH}/redis/data"}
   postgres_data:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${APPDATA_PATH}/postgres/data
+    driver_opts: {type: none, o: bind, device: "${APPDATA_PATH}/postgres/data"}
   evolution_data:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${APPDATA_PATH}/evolution-api
+    driver_opts: {type: none, o: bind, device: "${APPDATA_PATH}/evolution-api"}
   models_cache:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${APPDATA_PATH}/transcription/models
+    driver_opts: {type: none, o: bind, device: "${APPDATA_PATH}/transcription/models"}
   audio_temp:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${APPDATA_PATH}/transcription/audio_temp
+    driver_opts: {type: none, o: bind, device: "${APPDATA_PATH}/transcription/audio_temp"}
+  audio_store:
+    driver: local
+    driver_opts: {type: none, o: bind, device: "${APPDATA_PATH}/transcription/audio_store"}
   metabase_data:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${APPDATA_PATH}/metabase
+    driver_opts: {type: none, o: bind, device: "${APPDATA_PATH}/metabase"}
 
 services:
 
@@ -71,11 +63,11 @@ services:
     volumes:
       - evolution_data:/evolution/instances
     environment:
-      SERVER_URL: https://${EVOLUTION_DOMAIN}
+      SERVER_URL: "https://${EVOLUTION_DOMAIN}"
       AUTHENTICATION_TYPE: apikey
-      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
+      AUTHENTICATION_API_KEY: "${EVOLUTION_API_KEY}"
       WEBHOOK_GLOBAL_ENABLED: "true"
-      WEBHOOK_GLOBAL_URL: http://n8n:5678/webhook/whatsapp
+      WEBHOOK_GLOBAL_URL: "http://n8n:5678/webhook/whatsapp"
       WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS: "false"
       QRCODE_LIMIT: "30"
       DATABASE_ENABLED: "false"
@@ -85,7 +77,7 @@ services:
     mem_limit: 512m
     cpuset: "0"
     labels:
-      caddy: ${EVOLUTION_DOMAIN}
+      caddy: "${EVOLUTION_DOMAIN}"
       caddy.reverse_proxy: "{{upstreams 8080}}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/"]
@@ -93,7 +85,8 @@ services:
       timeout: 10s
       retries: 3
 
-  # ─── Redis ────────────────────────────────────────────────────────────────
+  # ─── Redis (broker + rate-limit store) ────────────────────────────────────
+  # Not exposed externally — transcription_net only.
   redis:
     image: redis:7-alpine
     container_name: transcription-redis
@@ -104,11 +97,11 @@ services:
       - redis_data:/data
     command: >
       redis-server
-      --maxmemory 256mb
+      --maxmemory 300mb
       --maxmemory-policy allkeys-lru
-      --save 60 1
+      --save 300 1
       --loglevel warning
-    mem_limit: 300m
+    mem_limit: 350m
     cpuset: "0"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -117,6 +110,7 @@ services:
       retries: 5
 
   # ─── PostgreSQL ───────────────────────────────────────────────────────────
+  # Not exposed externally — transcription_net only.
   postgres:
     image: postgres:16-alpine
     container_name: transcription-postgres
@@ -127,9 +121,9 @@ services:
       - postgres_data:/var/lib/postgresql/data
     environment:
       POSTGRES_DB: transcriptions
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    mem_limit: 256m
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    mem_limit: 300m
     cpuset: "0"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d transcriptions"]
@@ -140,7 +134,7 @@ services:
   # ─── Transcription API ────────────────────────────────────────────────────
   transcription-api:
     build:
-      context: ${SCRIPTS_PATH}/transcription-service
+      context: "${SCRIPTS_PATH}/transcription-service"
       dockerfile: Dockerfile
     image: transcription-service:local
     container_name: transcription-api
@@ -151,14 +145,23 @@ services:
     volumes:
       - models_cache:/app/models
       - audio_temp:/app/audio_temp
+      - audio_store:/app/audio_store
     environment:
-      REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/transcriptions
-      WHISPER_MODEL: ${WHISPER_MODEL:-medium}
-      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
-      WHISPER_THREADS: ${WHISPER_THREADS:-3}
+      REDIS_URL: "redis://redis:6379/0"
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/transcriptions"
+      WHISPER_MODEL: "${WHISPER_MODEL:-medium}"
+      WHISPER_COMPUTE_TYPE: "${WHISPER_COMPUTE_TYPE:-int8}"
+      WHISPER_THREADS: "${WHISPER_THREADS:-3}"
       AUDIO_TEMP_DIR: /app/audio_temp
-      MODEL_DIR: /app/models
+      AUDIO_STORE_DIR: /app/audio_store
+      AUDIO_RETENTION_DAYS: "${AUDIO_RETENTION_DAYS:-30}"
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY}"
+      LANG_CACHE_TTL_DAYS: "${LANG_CACHE_TTL_DAYS:-60}"
+      MAX_AUDIO_MINUTES_PER_DAY: "${MAX_AUDIO_MINUTES_PER_DAY:-120}"
+      MAX_QUEUE_PER_USER: "${MAX_QUEUE_PER_USER:-5}"
+      COOLDOWN_SECONDS: "${COOLDOWN_SECONDS:-3}"
+      MAX_SINGLE_AUDIO_MINUTES: "${MAX_SINGLE_AUDIO_MINUTES:-10}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     mem_limit: 512m
     cpuset: "1,2,3"
     depends_on:
@@ -167,16 +170,16 @@ services:
       postgres:
         condition: service_healthy
     labels:
-      caddy: ${TRANSCRIPTION_DOMAIN}
+      caddy: "${TRANSCRIPTION_DOMAIN}"
       caddy.reverse_proxy: "{{upstreams 8000}}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 20s
 
-  # ─── Celery Worker ────────────────────────────────────────────────────────
+  # ─── Celery Worker (transcription) ────────────────────────────────────────
   celery-worker:
     image: transcription-service:local
     container_name: transcription-worker
@@ -186,22 +189,27 @@ services:
     volumes:
       - models_cache:/app/models
       - audio_temp:/app/audio_temp
+      - audio_store:/app/audio_store
     environment:
-      REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/transcriptions
-      WHISPER_MODEL: ${WHISPER_MODEL:-medium}
-      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
-      WHISPER_THREADS: ${WHISPER_THREADS:-3}
+      REDIS_URL: "redis://redis:6379/0"
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/transcriptions"
+      WHISPER_MODEL: "${WHISPER_MODEL:-medium}"
+      WHISPER_COMPUTE_TYPE: "${WHISPER_COMPUTE_TYPE:-int8}"
+      WHISPER_THREADS: "${WHISPER_THREADS:-3}"
       AUDIO_TEMP_DIR: /app/audio_temp
-      MODEL_DIR: /app/models
+      AUDIO_STORE_DIR: /app/audio_store
+      AUDIO_RETENTION_DAYS: "${AUDIO_RETENTION_DAYS:-30}"
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY}"
+      LANG_CACHE_TTL_DAYS: "${LANG_CACHE_TTL_DAYS:-60}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     command: >
       celery -A tasks worker
       --loglevel=info
       --concurrency=1
       --prefetch-multiplier=1
       -Q transcription
-    # medium model: 1500m. Change to 3g for large-v3
-    mem_limit: 1500m
+    # medium: 1500m | large-v3: 3g
+    mem_limit: "${WORKER_MEM_LIMIT:-1500m}"
     cpuset: "1,2,3"
     depends_on:
       redis:
@@ -209,7 +217,7 @@ services:
       postgres:
         condition: service_healthy
 
-  # ─── Celery Beat (scheduler) ──────────────────────────────────────────────
+  # ─── Celery Beat (scheduled tasks) ────────────────────────────────────────
   celery-beat:
     image: transcription-service:local
     container_name: transcription-beat
@@ -217,18 +225,24 @@ services:
     networks:
       - transcription_net
     volumes:
+      - audio_store:/app/audio_store
       - audio_temp:/app/audio_temp
     environment:
-      REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/transcriptions
+      REDIS_URL: "redis://redis:6379/0"
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/transcriptions"
       AUDIO_TEMP_DIR: /app/audio_temp
+      AUDIO_STORE_DIR: /app/audio_store
+      AUDIO_RETENTION_DAYS: "${AUDIO_RETENTION_DAYS:-30}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     command: celery -A tasks beat --loglevel=info
     mem_limit: 128m
     cpuset: "0"
     depends_on:
       - celery-worker
 
-  # ─── Metabase (Admin Dashboard) ───────────────────────────────────────────
+  # ─── Metabase (Admin Analytics Dashboard) ─────────────────────────────────
+  # Access: https://${METABASE_DOMAIN} — protected by Caddy basicauth
+  # First-run setup wizard runs at port 3000.
   metabase:
     image: metabase/metabase:latest
     container_name: transcription-metabase
@@ -242,21 +256,22 @@ services:
       MB_DB_TYPE: postgres
       MB_DB_DBNAME: transcriptions
       MB_DB_PORT: "5432"
-      MB_DB_USER: ${POSTGRES_USER}
-      MB_DB_PASS: ${POSTGRES_PASSWORD}
+      MB_DB_USER: "${POSTGRES_USER}"
+      MB_DB_PASS: "${POSTGRES_PASSWORD}"
       MB_DB_HOST: postgres
       JAVA_TIMEZONE: Asia/Jerusalem
-    mem_limit: 512m
+      MB_SEND_EMAIL_ON_FIRST_LOGIN_FROM_NEW_DEVICE: "false"
+    mem_limit: 600m
     cpuset: "0"
     depends_on:
       postgres:
         condition: service_healthy
     labels:
-      caddy: ${METABASE_DOMAIN}
+      caddy: "${METABASE_DOMAIN}"
       caddy.reverse_proxy: "{{upstreams 3000}}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 90s
