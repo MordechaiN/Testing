@@ -5,7 +5,7 @@ param()
 Set-StrictMode -Version Latest
 
 # ============================================================
-#  Move-SQLCompanyFiles.ps1  v1.3
+#  Move-SQLCompanyFiles.ps1  v1.4
 #  SQL Company File Archiver
 #  Safe Move Utility for WIZSOFT Environments
 #  NEVER deletes files - only moves them
@@ -37,9 +37,17 @@ $ValidExtensions = @(".BAK", ".bak", ".mdf", ".ldf")
 
 $DesktopPath  = [Environment]::GetFolderPath("Desktop")
 $RunTimestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+
+# Unique run ID for auditing and cross-referencing logs
+$RunId        = "RUN-" + (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + `
+                ([System.Guid]::NewGuid().ToString().Substring(0,4).ToUpper())
+
 $LogFilePath  = Join-Path $DesktopPath "SQLMove_Log_$RunTimestamp.txt"
 $CsvFilePath  = Join-Path $DesktopPath "SQLMove_Report_$RunTimestamp.csv"
 $JsonFilePath = Join-Path $DesktopPath "SQLMove_Log_$RunTimestamp.json"
+
+# Manifest written inside the destination folder after a live move
+$ManifestPath = Join-Path $DestinationFolder "_manifest_$RunTimestamp.json"
 
 # ============================================================
 #  COUNTERS
@@ -176,9 +184,10 @@ function Show-Header {
 
     Clear-Host
     Write-Host ("=" * 65) -ForegroundColor DarkCyan
-    Write-Host "  SQL COMPANY FILE ARCHIVER  v1.3"                          -ForegroundColor Cyan
+    Write-Host "  SQL COMPANY FILE ARCHIVER  v1.4"                          -ForegroundColor Cyan
     Write-Host "  Safe Move Utility for WIZSOFT Environments"               -ForegroundColor DarkCyan
     Write-Host ("=" * 65) -ForegroundColor DarkCyan
+    Write-Host "  Run ID      : $script:RunId"                              -ForegroundColor White
     Write-Host "  Mode        : $mode"                                      -ForegroundColor $modeColor
     Write-Host "  Server      : $env:COMPUTERNAME"                          -ForegroundColor White
     Write-Host "  Destination : $script:DestinationFolder"                  -ForegroundColor White
@@ -323,7 +332,7 @@ if ($WhatIfPreference) {
 Show-Header -IsDryRun $IsDryRun
 
 $modeLog = if ($IsDryRun) { "DRY-RUN" } else { "LIVE" }
-Write-Log "Script started | Mode: $modeLog | Server: $env:COMPUTERNAME"
+Write-Log "Script started | Run ID: $RunId | Mode: $modeLog | Server: $env:COMPUTERNAME"
 Write-Log "Log  : $LogFilePath"
 Write-Log "CSV  : $CsvFilePath"
 Write-Log "JSON : $JsonFilePath"
@@ -433,6 +442,14 @@ foreach ($sourceFolder in $SourceFolders) {
 
             $TotalScanned++
 
+            # Live progress so the user knows the scan is running, not stuck
+            if ($TotalScanned % 50 -eq 0) {
+                Write-Progress `
+                    -Activity "Scanning folders..." `
+                    -Status   "Folder: $(Split-Path $sourceFolder -Leaf) | Files checked: $TotalScanned | Matched: $($Stats.TotalMatched)" `
+                    -CurrentOperation $file.FullName
+            }
+
             if ($ProcessedPaths.Contains($file.FullName)) {
                 Write-Log "Duplicate path skipped: $($file.FullName)" "WARNING"
                 continue
@@ -457,6 +474,7 @@ foreach ($sourceFolder in $SourceFolders) {
     }
 }
 
+Write-Progress -Activity "Scanning folders..." -Completed
 Write-Log "Scan complete. Scanned: $TotalScanned | Matched: $($Stats.TotalMatched) | Size: $(Format-FileSize -Bytes $Stats.TotalBytesMatched)"
 
 foreach ($name in $SearchNames) {
@@ -619,8 +637,10 @@ Write-Host "   OPERATION SUMMARY"  -ForegroundColor Cyan
 Write-Host $sep                    -ForegroundColor DarkCyan
 
 $summaryLines = @(
+    "  Run ID              : $RunId",
     "  Run mode            : $modeLabel",
     "  Server              : $env:COMPUTERNAME",
+    "  Operator            : $env:USERNAME",
     "  Start time          : $($StartTime.ToString('yyyy-MM-dd HH:mm:ss'))",
     "  End time            : $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))",
     "  Duration            : $([int]$Duration.TotalSeconds) second(s)",
@@ -675,17 +695,22 @@ catch {
     Write-Log "Could not save CSV: $_" "ERROR"
 }
 
+$runInfo = [PSCustomObject]@{
+    ScriptVersion = "1.4"
+    RunId         = $RunId
+    Server        = $env:COMPUTERNAME
+    Operator      = $env:USERNAME
+    Mode          = $modeLabel
+    StartTime     = $StartTime.ToString("yyyy-MM-dd HH:mm:ss")
+    EndTime       = $EndTime.ToString("yyyy-MM-dd HH:mm:ss")
+    DurationSec   = [int]$Duration.TotalSeconds
+    Destination   = $DestinationFolder
+    SourceFolders = $SourceFolders
+}
+
 try {
     $jsonPayload = [PSCustomObject]@{
-        RunInfo = [PSCustomObject]@{
-            ScriptVersion = "1.3"
-            Server        = $env:COMPUTERNAME
-            Mode          = $modeLabel
-            StartTime     = $StartTime.ToString("yyyy-MM-dd HH:mm:ss")
-            EndTime       = $EndTime.ToString("yyyy-MM-dd HH:mm:ss")
-            DurationSec   = [int]$Duration.TotalSeconds
-            Destination   = $DestinationFolder
-        }
+        RunInfo     = $runInfo
         SearchNames = $SearchNames.ToArray()
         Summary     = $Stats
         Files       = $JsonRows.ToArray()
@@ -696,6 +721,28 @@ try {
 }
 catch {
     Write-Log "Could not save JSON: $_" "ERROR"
+}
+
+# Write manifest.json inside the destination folder (only after a live move with results)
+if (-not $IsDryRun -and $Stats.TotalMoved -gt 0) {
+    try {
+        $movedFiles = $JsonRows | Where-Object { $_.Status -eq "MOVED" }
+        $manifest = [PSCustomObject]@{
+            RunId         = $RunId
+            MoveDate      = $EndTime.ToString("yyyy-MM-dd HH:mm:ss")
+            Server        = $env:COMPUTERNAME
+            Operator      = $env:USERNAME
+            TotalFiles    = $Stats.TotalMoved
+            TotalSizeMoved = Format-FileSize -Bytes $Stats.TotalBytesMoved
+            Files         = $movedFiles
+        }
+        $manifest | ConvertTo-Json -Depth 5 |
+            Out-File -FilePath $ManifestPath -Encoding UTF8 -Force
+        Write-Log "Manifest   : $ManifestPath" "SUCCESS"
+    }
+    catch {
+        Write-Log "Could not save manifest: $_" "ERROR"
+    }
 }
 
 # ----------------------------------------------------------
