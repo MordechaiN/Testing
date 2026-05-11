@@ -5,7 +5,7 @@ param()
 Set-StrictMode -Version Latest
 
 # ============================================================
-#  Move-SQLCompanyFiles.ps1  v1.4
+#  Move-SQLCompanyFiles.ps1  v1.5
 #  SQL Company File Archiver
 #  Safe Move Utility for WIZSOFT Environments
 #  NEVER deletes files - only moves them
@@ -31,7 +31,13 @@ $SourceFolders = @(
     "C:\hash\rep\BACKUP"
 )
 
-$DestinationFolder = "C:\Users\administrator.MN\Desktop\חברות שנמחקו"
+# Hebrew folder name built from Unicode code points so it is never
+# corrupted by encoding mismatches when the script file is read.
+# Unicode: chet(05D7) bet(05D1) resh(05E8) vav(05D5) tav(05EA)
+#          shin(05E9) nun(05E0) mem(05DE) chet(05D7) qof(05E7) vav(05D5)
+$_heb = [string][char[]]@(0x05D7,0x05D1,0x05E8,0x05D5,0x05EA,' ',
+                           0x05E9,0x05E0,0x05DE,0x05D7,0x05E7,0x05D5)
+$DestinationFolder = "C:\Users\administrator.MN\Desktop\$_heb"
 
 $ValidExtensions = @(".BAK", ".bak", ".mdf", ".ldf")
 
@@ -179,21 +185,16 @@ function Add-CsvRow {
 
 function Show-Header {
     param([bool]$IsDryRun)
-    $mode      = if ($IsDryRun) { "DRY-RUN (simulation - no files will move)" } else { "LIVE" }
+    $mode      = if ($IsDryRun) { "DRY-RUN" } else { "LIVE" }
     $modeColor = if ($IsDryRun) { "Magenta" } else { "Red" }
 
     Clear-Host
-    Write-Host ("=" * 65) -ForegroundColor DarkCyan
-    Write-Host "  SQL COMPANY FILE ARCHIVER  v1.4"                          -ForegroundColor Cyan
-    Write-Host "  Safe Move Utility for WIZSOFT Environments"               -ForegroundColor DarkCyan
-    Write-Host ("=" * 65) -ForegroundColor DarkCyan
-    Write-Host "  Run ID      : $script:RunId"                              -ForegroundColor White
-    Write-Host "  Mode        : $mode"                                      -ForegroundColor $modeColor
-    Write-Host "  Server      : $env:COMPUTERNAME"                          -ForegroundColor White
-    Write-Host "  Destination : $script:DestinationFolder"                  -ForegroundColor White
-    Write-Host "  Log         : $script:LogFilePath"                        -ForegroundColor DarkGray
-    Write-Host "  Timestamp   : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor White
-    Write-Host ("=" * 65) -ForegroundColor DarkCyan
+    Write-Host ("=" * 55) -ForegroundColor DarkCyan
+    Write-Host "  SQL COMPANY FILE ARCHIVER  v1.5" -ForegroundColor Cyan
+    Write-Host ("=" * 55) -ForegroundColor DarkCyan
+    Write-Host "  $script:RunId  |  $env:COMPUTERNAME  |  $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -ForegroundColor DarkGray
+    Write-Host ("  Mode: " + $mode) -ForegroundColor $modeColor
+    Write-Host ("=" * 55) -ForegroundColor DarkCyan
     Write-Host ""
 }
 
@@ -310,9 +311,9 @@ $OutputEncoding           = [System.Text.Encoding]::UTF8
 # ----------------------------------------------------------
 
 Clear-Host
-Write-Host ("=" * 65) -ForegroundColor DarkCyan
-Write-Host "  SQL COMPANY FILE ARCHIVER  v1.3" -ForegroundColor Cyan
-Write-Host ("=" * 65) -ForegroundColor DarkCyan
+Write-Host ("=" * 55) -ForegroundColor DarkCyan
+Write-Host "  SQL COMPANY FILE ARCHIVER  v1.5" -ForegroundColor Cyan
+Write-Host ("=" * 55) -ForegroundColor DarkCyan
 Write-Host ""
 
 $StartTime = Get-Date
@@ -320,11 +321,10 @@ $StartTime = Get-Date
 if ($WhatIfPreference) {
     $IsDryRun = $true
 } else {
-    Write-Host "  Select run mode:" -ForegroundColor White
-    Write-Host "  [Y] DRY-RUN - Simulation only. Nothing will move." -ForegroundColor Magenta
-    Write-Host "  [N] LIVE    - Files WILL be moved for real."       -ForegroundColor Red
+    Write-Host "  [Y]  DRY-RUN  -  Simulation only. Nothing will move." -ForegroundColor Magenta
+    Write-Host "  [N]  LIVE     -  Files WILL be moved for real."       -ForegroundColor Red
     Write-Host ""
-    $dryInput = Read-Host "  Y / N"
+    $dryInput = Read-Host "  Select mode (Y/N)"
     $IsDryRun = ($dryInput.Trim().ToUpper() -eq "Y")
 }
 
@@ -341,24 +341,29 @@ Write-Log "JSON : $JsonFilePath"
 #  STEP 2 : NUMBERED NAME INPUT
 # ----------------------------------------------------------
 
-Write-Section "ENTER COMPANY / FILE NAMES"
+Write-Section "ENTER COMPANY NAMES"
 Write-Host ""
-Write-Host "  Enter one company name per line (exact base name, no extension)." -ForegroundColor White
-Write-Host "  Press ENTER on an empty line when finished." -ForegroundColor DarkGray
+Write-Host "  Enter one company name per line." -ForegroundColor White
+Write-Host "  Press ENTER on an empty line to start scanning." -ForegroundColor White
+Write-Host ""
+Write-Host "  Examples:" -ForegroundColor DarkGray
+Write-Host "    RAWDA2020" -ForegroundColor DarkGray
+Write-Host "    ABC" -ForegroundColor DarkGray
+Write-Host "    MOSHE" -ForegroundColor DarkGray
 Write-Host ""
 
 $SearchNames = [System.Collections.Generic.List[string]]::new()
 
 while ($true) {
     $idx = $SearchNames.Count + 1
-    $raw = Read-Host "  [$idx]"
+    $raw = Read-Host "  Company Name [$idx]"
     if ([string]::IsNullOrWhiteSpace($raw)) { break }
     $trimmed = $raw.Trim()
     if ($SearchNames.Contains($trimmed)) {
-        Write-Host "  -> Duplicate, skipped: $trimmed" -ForegroundColor Yellow
+        Write-Host "  [SKIP] Already added: $trimmed" -ForegroundColor Yellow
     } else {
         $SearchNames.Add($trimmed)
-        Write-Host "  -> Added: $trimmed" -ForegroundColor Green
+        Write-Host "  [OK] Added: $trimmed" -ForegroundColor Green
     }
 }
 
@@ -367,6 +372,9 @@ if ($SearchNames.Count -eq 0) {
     Save-Log
     exit 1
 }
+
+Write-Host ""
+Write-Host "  Starting scan..." -ForegroundColor Cyan
 
 $Stats.TotalRequested = $SearchNames.Count
 Write-Log "Names entered ($($Stats.TotalRequested)): $($SearchNames -join ' | ')"
@@ -427,10 +435,12 @@ $TotalScanned = 0
 foreach ($sourceFolder in $SourceFolders) {
 
     if (-not (Test-Path -LiteralPath $sourceFolder)) {
+        Write-Host "  [SKIP] Folder not found: $sourceFolder" -ForegroundColor Yellow
         Write-Log "Skipping missing folder: $sourceFolder" "WARNING"
         continue
     }
 
+    Write-Host "  [>>] $sourceFolder" -ForegroundColor Cyan
     Write-Log "Scanning: $sourceFolder"
 
     try {
@@ -442,11 +452,11 @@ foreach ($sourceFolder in $SourceFolders) {
 
             $TotalScanned++
 
-            # Live progress so the user knows the scan is running, not stuck
+            # Update progress bar every 50 files so user sees activity, not a freeze
             if ($TotalScanned % 50 -eq 0) {
                 Write-Progress `
-                    -Activity "Scanning folders..." `
-                    -Status   "Folder: $(Split-Path $sourceFolder -Leaf) | Files checked: $TotalScanned | Matched: $($Stats.TotalMatched)" `
+                    -Activity "Scanning..." `
+                    -Status   "Checked: $TotalScanned  |  Matched: $($Stats.TotalMatched)  |  $($file.Name)" `
                     -CurrentOperation $file.FullName
             }
 
