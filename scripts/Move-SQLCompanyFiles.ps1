@@ -5,22 +5,20 @@ param()
 Set-StrictMode -Version Latest
 
 # ============================================================
-#  Move-SQLCompanyFiles.ps1  v1.2
-#  Production Tool - SQL Company File Mover
-#  Environment : Windows Server / Accounting System (Chashbashevet)
+#  Move-SQLCompanyFiles.ps1  v1.3
+#  SQL Company File Archiver
+#  Safe Move Utility for WIZSOFT Environments
 #  NEVER deletes files - only moves them
 #
-#  IMPORTANT - ENCODING:
-#  This file must be saved as UTF-8 WITH BOM so that the Hebrew
-#  destination folder path is read correctly by PowerShell 5.1.
-#  In Notepad: File -> Save As -> Encoding: "UTF-8 with BOM"
-#  In Notepad++: Encoding -> "UTF-8 with BOM"
-#  In VS Code: bottom-right corner click "UTF-8" -> "Save with encoding" -> "UTF-8 with BOM"
+#  ENCODING: Save this file as UTF-8 WITH BOM
+#  Notepad++  : Encoding -> "Encode in UTF-8 with BOM"
+#  Notepad    : File -> Save As -> Encoding: "UTF-8 with BOM"
+#  VS Code    : Ctrl+Shift+P -> "Change File Encoding" -> "UTF-8 with BOM"
 #
 #  CLI usage:
-#    .\Move-SQLCompanyFiles.ps1            (interactive - asks DRY-RUN or LIVE)
-#    .\Move-SQLCompanyFiles.ps1 -WhatIf   (forces DRY-RUN without prompt)
-#    .\Move-SQLCompanyFiles.ps1 -Confirm  (asks per-file confirmation)
+#    .\Move-SQLCompanyFiles.ps1            (interactive)
+#    .\Move-SQLCompanyFiles.ps1 -WhatIf   (forces DRY-RUN)
+#    .\Move-SQLCompanyFiles.ps1 -Confirm  (asks per-file)
 # ============================================================
 
 # ============================================================
@@ -35,28 +33,28 @@ $SourceFolders = @(
 
 $DestinationFolder = "C:\Users\administrator.MN\Desktop\חברות שנמחקו"
 
-# Extension list - covers all case variants
 $ValidExtensions = @(".BAK", ".bak", ".mdf", ".ldf")
 
 $DesktopPath  = [Environment]::GetFolderPath("Desktop")
 $RunTimestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 $LogFilePath  = Join-Path $DesktopPath "SQLMove_Log_$RunTimestamp.txt"
 $CsvFilePath  = Join-Path $DesktopPath "SQLMove_Report_$RunTimestamp.csv"
+$JsonFilePath = Join-Path $DesktopPath "SQLMove_Log_$RunTimestamp.json"
 
 # ============================================================
 #  COUNTERS
-#  TotalMoved     = files physically moved (LIVE only)
-#  TotalSimulated = files that would move  (DRY-RUN only)
 # ============================================================
 
 $Stats = [ordered]@{
-    TotalRequested  = 0
-    TotalMatched    = 0
-    TotalMoved      = 0
-    TotalSimulated  = 0
-    TotalFailed     = 0
-    TotalNotFound   = 0
-    TotalRenamedDup = 0
+    TotalRequested    = 0
+    TotalMatched      = 0
+    TotalMoved        = 0
+    TotalSimulated    = 0
+    TotalFailed       = 0
+    TotalNotFound     = 0
+    TotalRenamedDup   = 0
+    TotalBytesMatched = 0L
+    TotalBytesMoved   = 0L
 }
 
 # ============================================================
@@ -65,31 +63,45 @@ $Stats = [ordered]@{
 
 $LogLines = [System.Collections.Generic.List[string]]::new()
 $CsvRows  = [System.Collections.Generic.List[PSCustomObject]]::new()
+$JsonRows = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-# HashSet prevents double-processing when the same file is
-# reachable from more than one source folder path
 $ProcessedPaths = [System.Collections.Generic.HashSet[string]]::new(
     [System.StringComparer]::OrdinalIgnoreCase
 )
 
 # ============================================================
+#  HELPER : Format-FileSize
+# ============================================================
+
+function Format-FileSize {
+    param([long]$Bytes)
+    if ($Bytes -ge 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
+    if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
+    if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
+    return "$Bytes B"
+}
+
+# ============================================================
 #  HELPER : Write-Log
+#  Levels: INFO(Cyan)  SUCCESS(Green)  WARNING(Yellow)
+#          ERROR(Red)  DRYRUN(Magenta)
 # ============================================================
 
 function Write-Log {
     param(
         [string]$Message,
-        [ValidateSet("INFO","SUCCESS","WARNING","ERROR")]
+        [ValidateSet("INFO","SUCCESS","WARNING","ERROR","DRYRUN")]
         [string]$Level = "INFO"
     )
     $ts   = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $line = "[$ts][$Level] $Message"
     $script:LogLines.Add($line)
     switch ($Level) {
-        "SUCCESS" { Write-Host $line -ForegroundColor Green  }
-        "WARNING" { Write-Host $line -ForegroundColor Yellow }
-        "ERROR"   { Write-Host $line -ForegroundColor Red    }
-        default   { Write-Host $line -ForegroundColor Cyan   }
+        "SUCCESS" { Write-Host $line -ForegroundColor Green   }
+        "WARNING" { Write-Host $line -ForegroundColor Yellow  }
+        "ERROR"   { Write-Host $line -ForegroundColor Red     }
+        "DRYRUN"  { Write-Host $line -ForegroundColor Magenta }
+        default   { Write-Host $line -ForegroundColor Cyan    }
     }
 }
 
@@ -105,9 +117,9 @@ function Write-Section {
     $script:LogLines.Add("   $Title")
     $script:LogLines.Add($sep)
     Write-Host ""
-    Write-Host $sep         -ForegroundColor DarkGray
-    Write-Host "   $Title"  -ForegroundColor White
-    Write-Host $sep         -ForegroundColor DarkGray
+    Write-Host $sep        -ForegroundColor DarkGray
+    Write-Host "   $Title" -ForegroundColor White
+    Write-Host $sep        -ForegroundColor DarkGray
 }
 
 # ============================================================
@@ -134,27 +146,96 @@ function Add-CsvRow {
         [string]$SourcePath,
         [string]$DestinationPath,
         [string]$Status,
-        [string]$Notes = ""
+        [long]$SizeBytes   = 0,
+        [string]$Notes     = ""
     )
-    $script:CsvRows.Add([PSCustomObject]@{
+    $row = [PSCustomObject]@{
         Timestamp       = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         SearchName      = $SearchName
         FileName        = $FileName
         SourcePath      = $SourcePath
         DestinationPath = $DestinationPath
         Status          = $Status
+        SizeBytes       = $SizeBytes
+        SizeHuman       = Format-FileSize -Bytes $SizeBytes
         Notes           = $Notes
-    })
+    }
+    $script:CsvRows.Add($row)
+    $script:JsonRows.Add($row)
+}
+
+# ============================================================
+#  HELPER : Show-Header
+#  Professional header shown after mode is selected.
+# ============================================================
+
+function Show-Header {
+    param([bool]$IsDryRun)
+    $mode      = if ($IsDryRun) { "DRY-RUN (simulation - no files will move)" } else { "LIVE" }
+    $modeColor = if ($IsDryRun) { "Magenta" } else { "Red" }
+
+    Clear-Host
+    Write-Host ("=" * 65) -ForegroundColor DarkCyan
+    Write-Host "  SQL COMPANY FILE ARCHIVER  v1.3"                          -ForegroundColor Cyan
+    Write-Host "  Safe Move Utility for WIZSOFT Environments"               -ForegroundColor DarkCyan
+    Write-Host ("=" * 65) -ForegroundColor DarkCyan
+    Write-Host "  Mode        : $mode"                                      -ForegroundColor $modeColor
+    Write-Host "  Server      : $env:COMPUTERNAME"                          -ForegroundColor White
+    Write-Host "  Destination : $script:DestinationFolder"                  -ForegroundColor White
+    Write-Host "  Log         : $script:LogFilePath"                        -ForegroundColor DarkGray
+    Write-Host "  Timestamp   : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor White
+    Write-Host ("=" * 65) -ForegroundColor DarkCyan
+    Write-Host ""
+}
+
+# ============================================================
+#  HELPER : Show-FileTable
+#  Renders a preview table of all matched files.
+#  Returns total bytes found.
+# ============================================================
+
+function Show-FileTable {
+    param(
+        [hashtable]$MatchedFiles,
+        [string[]]$SearchNames
+    )
+
+    $divider = "-" * 76
+    $header  = "  {0,-4} {1,-18} {2,-6} {3,-12} {4}" -f "#", "Company", "Ext", "Size", "Source folder"
+
+    Write-Host ""
+    Write-Host "  Found Files" -ForegroundColor White
+    Write-Host "  $divider"   -ForegroundColor DarkGray
+    Write-Host $header        -ForegroundColor White
+    Write-Host "  $divider"   -ForegroundColor DarkGray
+
+    $idx        = 0
+    $totalBytes = 0L
+
+    foreach ($name in $SearchNames) {
+        foreach ($f in $MatchedFiles[$name]) {
+            $idx++
+            $totalBytes += $f.Length
+            $size        = Format-FileSize -Bytes $f.Length
+            $shortSrc    = Split-Path $f.DirectoryName -Leaf
+            $row         = "  {0,-4} {1,-18} {2,-6} {3,-12} {4}" -f $idx, $name, $f.Extension, $size, $shortSrc
+            Write-Host $row -ForegroundColor Cyan
+        }
+    }
+
+    Write-Host "  $divider" -ForegroundColor DarkGray
+    $totalLabel = "  Total Files : $idx    Total Size : $(Format-FileSize -Bytes $totalBytes)"
+    Write-Host $totalLabel  -ForegroundColor White
+    Write-Host "  $divider" -ForegroundColor DarkGray
+    Write-Host ""
+
+    return $totalBytes
 }
 
 # ============================================================
 #  HELPER : Build-MatchRegex
-#
-#  Creates ONE compiled regex for all search names.
-#  Pattern: ^(NAME1|NAME2|NAME3)$  (case-insensitive, exact match)
-#
-#  "ABC" matches  -> ABC.bak  ABC.mdf  ABC.ldf
-#  "ABC" does NOT -> ABC_log.ldf  ABC123.bak  MYABC.bak
+#  Exact match: ^(NAME1|NAME2)$   (case-insensitive, compiled)
+#  "ABC" matches ABC.bak / ABC.mdf  but NOT ABC_log.ldf
 # ============================================================
 
 function Build-MatchRegex {
@@ -170,28 +251,20 @@ function Build-MatchRegex {
 
 # ============================================================
 #  HELPER : Get-MatchedName
-#  Returns the search name that exactly matched the baseName.
 # ============================================================
 
 function Get-MatchedName {
-    param(
-        [string]$BaseName,
-        [string[]]$SearchNames
-    )
+    param([string]$BaseName, [string[]]$SearchNames)
     $cmp = [System.StringComparer]::OrdinalIgnoreCase
     foreach ($name in $SearchNames) {
-        if ($cmp.Equals($BaseName, $name)) {
-            return $name
-        }
+        if ($cmp.Equals($BaseName, $name)) { return $name }
     }
     return $null
 }
 
 # ============================================================
 #  HELPER : Get-TimestampedDestPath
-#  If a file already exists at the destination, inject a
-#  timestamp with milliseconds before the extension.
-#  Example: ABC.bak -> ABC_2026-05-11_14-30-22-347.bak
+#  ABC.bak -> ABC_2026-05-11_14-30-22-347.bak
 # ============================================================
 
 function Get-TimestampedDestPath {
@@ -205,20 +278,13 @@ function Get-TimestampedDestPath {
 
 # ============================================================
 #  HELPER : Test-DestinationInsideSource
-#  Safety check: destination must not be a sub-path of any source.
 # ============================================================
 
 function Test-DestinationInsideSource {
-    param(
-        [string]$Destination,
-        [string[]]$Sources
-    )
+    param([string]$Destination, [string[]]$Sources)
     $destNorm = $Destination.TrimEnd('\').ToLower()
     foreach ($src in $Sources) {
-        $srcNorm = $src.TrimEnd('\').ToLower()
-        if ($destNorm.StartsWith($srcNorm)) {
-            return $true
-        }
+        if ($destNorm.StartsWith($src.TrimEnd('\').ToLower())) { return $true }
     }
     return $false
 }
@@ -230,67 +296,57 @@ function Test-DestinationInsideSource {
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding           = [System.Text.Encoding]::UTF8
 
+# ----------------------------------------------------------
+#  STEP 1 : MODE SELECTION  (before header so header shows mode)
+# ----------------------------------------------------------
+
 Clear-Host
 Write-Host ("=" * 65) -ForegroundColor DarkCyan
-Write-Host "   SQL Company File Mover  -  Production Tool  v1.2" -ForegroundColor Cyan
-Write-Host "   $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Cyan
+Write-Host "  SQL COMPANY FILE ARCHIVER  v1.3" -ForegroundColor Cyan
 Write-Host ("=" * 65) -ForegroundColor DarkCyan
 Write-Host ""
 
 $StartTime = Get-Date
-Write-Log "Script started"
-Write-Log "Log : $LogFilePath"
-Write-Log "CSV : $CsvFilePath"
-
-# ----------------------------------------------------------
-#  STEP 1 : DRY-RUN SELECTION
-#  If -WhatIf was passed on the CLI, force dry-run silently.
-# ----------------------------------------------------------
-
-Write-Section "SELECT RUN MODE"
 
 if ($WhatIfPreference) {
     $IsDryRun = $true
-    Write-Log "MODE: DRY-RUN (forced by -WhatIf parameter)" "WARNING"
 } else {
+    Write-Host "  Select run mode:" -ForegroundColor White
+    Write-Host "  [Y] DRY-RUN - Simulation only. Nothing will move." -ForegroundColor Magenta
+    Write-Host "  [N] LIVE    - Files WILL be moved for real."       -ForegroundColor Red
     Write-Host ""
-    Write-Host "  [Y] DRY-RUN - Simulation only. No files will be moved." -ForegroundColor Yellow
-    Write-Host "  [N] LIVE    - Files WILL be moved for real."             -ForegroundColor Red
-    Write-Host ""
-    $dryInput = Read-Host "  Enter Y for Dry-Run, N for Live move"
+    $dryInput = Read-Host "  Y / N"
     $IsDryRun = ($dryInput.Trim().ToUpper() -eq "Y")
-
-    if ($IsDryRun) {
-        Write-Log "MODE: DRY-RUN (simulation - nothing will be moved)" "WARNING"
-    } else {
-        Write-Log "MODE: LIVE (files WILL be physically moved)" "WARNING"
-    }
 }
 
+# Now draw the full professional header
+Show-Header -IsDryRun $IsDryRun
+
+$modeLog = if ($IsDryRun) { "DRY-RUN" } else { "LIVE" }
+Write-Log "Script started | Mode: $modeLog | Server: $env:COMPUTERNAME"
+Write-Log "Log  : $LogFilePath"
+Write-Log "CSV  : $CsvFilePath"
+Write-Log "JSON : $JsonFilePath"
+
 # ----------------------------------------------------------
-#  STEP 2 : COLLECT COMPANY / FILE NAMES
+#  STEP 2 : NUMBERED NAME INPUT
 # ----------------------------------------------------------
 
 Write-Section "ENTER COMPANY / FILE NAMES"
 Write-Host ""
-Write-Host "  Enter one name per line (base file name, no extension)." -ForegroundColor White
+Write-Host "  Enter one company name per line (exact base name, no extension)." -ForegroundColor White
 Write-Host "  Press ENTER on an empty line when finished." -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "  Example:" -ForegroundColor DarkGray
-Write-Host "    ABC"     -ForegroundColor DarkGray
-Write-Host "    MOSHE"   -ForegroundColor DarkGray
-Write-Host "    TEST123" -ForegroundColor DarkGray
-Write-Host "    <ENTER>" -ForegroundColor DarkGray
 Write-Host ""
 
 $SearchNames = [System.Collections.Generic.List[string]]::new()
 
 while ($true) {
-    $raw = Read-Host "  Name"
+    $idx = $SearchNames.Count + 1
+    $raw = Read-Host "  [$idx]"
     if ([string]::IsNullOrWhiteSpace($raw)) { break }
     $trimmed = $raw.Trim()
     if ($SearchNames.Contains($trimmed)) {
-        Write-Host "  -> Duplicate entry, skipped: $trimmed" -ForegroundColor Yellow
+        Write-Host "  -> Duplicate, skipped: $trimmed" -ForegroundColor Yellow
     } else {
         $SearchNames.Add($trimmed)
         Write-Host "  -> Added: $trimmed" -ForegroundColor Green
@@ -315,7 +371,7 @@ $MatchRegex = Build-MatchRegex -Names $SearchNames.ToArray()
 Write-Section "VALIDATING PATHS"
 
 if (Test-DestinationInsideSource -Destination $DestinationFolder -Sources $SourceFolders) {
-    Write-Log "FATAL: Destination folder is inside a source folder. Aborting." "ERROR"
+    Write-Log "FATAL: Destination is inside a source folder. Aborting." "ERROR"
     Save-Log
     exit 1
 }
@@ -330,7 +386,7 @@ foreach ($folder in $SourceFolders) {
 
 if (-not (Test-Path -LiteralPath $DestinationFolder)) {
     if ($IsDryRun) {
-        Write-Log "[DRY-RUN] Would create destination: $DestinationFolder" "WARNING"
+        Write-Log "[DRY-RUN] Would create destination: $DestinationFolder" "DRYRUN"
     } else {
         try {
             New-Item -ItemType Directory -Path $DestinationFolder -Force | Out-Null
@@ -347,7 +403,7 @@ if (-not (Test-Path -LiteralPath $DestinationFolder)) {
 }
 
 # ----------------------------------------------------------
-#  STEP 4 : SCAN SOURCE FOLDERS
+#  STEP 4 : SCAN
 # ----------------------------------------------------------
 
 Write-Section "SCANNING SOURCE FOLDERS"
@@ -378,7 +434,7 @@ foreach ($sourceFolder in $SourceFolders) {
             $TotalScanned++
 
             if ($ProcessedPaths.Contains($file.FullName)) {
-                Write-Log "Skipping duplicate path (already queued): $($file.FullName)" "WARNING"
+                Write-Log "Duplicate path skipped: $($file.FullName)" "WARNING"
                 continue
             }
 
@@ -389,7 +445,8 @@ foreach ($sourceFolder in $SourceFolders) {
                 if ($null -ne $matchedName) {
                     $null = $ProcessedPaths.Add($file.FullName)
                     $MatchedFiles[$matchedName].Add($file)
-                    Write-Log "  FOUND [$matchedName]: $($file.FullName)" "SUCCESS"
+                    $Stats.TotalBytesMatched += $file.Length
+                    Write-Log "  FOUND [$matchedName]: $($file.FullName)  ($(Format-FileSize -Bytes $file.Length))" "SUCCESS"
                     $Stats.TotalMatched++
                 }
             }
@@ -400,11 +457,11 @@ foreach ($sourceFolder in $SourceFolders) {
     }
 }
 
-Write-Log "Scan complete. Scanned: $TotalScanned | Matched: $($Stats.TotalMatched)"
+Write-Log "Scan complete. Scanned: $TotalScanned | Matched: $($Stats.TotalMatched) | Size: $(Format-FileSize -Bytes $Stats.TotalBytesMatched)"
 
 foreach ($name in $SearchNames) {
     if ($MatchedFiles[$name].Count -eq 0) {
-        Write-Log "NOT FOUND: No files matched for '$name'" "WARNING"
+        Write-Log "NOT FOUND: '$name'" "WARNING"
         $Stats.TotalNotFound++
         Add-CsvRow -SearchName $name -FileName "" -SourcePath "" `
                    -DestinationPath "" -Status "NOT_FOUND" `
@@ -413,10 +470,10 @@ foreach ($name in $SearchNames) {
 }
 
 # ----------------------------------------------------------
-#  STEP 5 : PREVIEW + CONFIRMATION
+#  STEP 5 : PREVIEW TABLE + CONFIRMATION
 # ----------------------------------------------------------
 
-Write-Section "FILES TO BE MOVED - PREVIEW"
+Write-Section "PREVIEW"
 
 if ($Stats.TotalMatched -eq 0) {
     Write-Log "No files found. Nothing to move." "WARNING"
@@ -424,47 +481,36 @@ if ($Stats.TotalMatched -eq 0) {
     exit 0
 }
 
-foreach ($name in $SearchNames) {
-    if ($MatchedFiles[$name].Count -gt 0) {
-        Write-Host ""
-        $count = $MatchedFiles[$name].Count
-        Write-Host "  [$name]  ($count files)" -ForegroundColor White
-        foreach ($f in $MatchedFiles[$name]) {
-            Write-Host "    $($f.FullName)" -ForegroundColor Cyan
-        }
-    }
-}
-
-Write-Host ""
+$previewBytes = Show-FileTable -MatchedFiles $MatchedFiles -SearchNames $SearchNames.ToArray()
 
 if ($IsDryRun) {
-    Write-Host "  [DRY-RUN] These files WOULD be moved to:" -ForegroundColor Yellow
-    Write-Host "  $DestinationFolder" -ForegroundColor Yellow
+    Write-Host "  [DRY-RUN] The above files WOULD be moved to:" -ForegroundColor Magenta
+    Write-Host "  $DestinationFolder" -ForegroundColor Magenta
     Write-Host ""
-    Write-Host "  No confirmation needed in Dry-Run mode." -ForegroundColor DarkGray
+    Write-Host "  No confirmation needed in DRY-RUN mode." -ForegroundColor DarkGray
 } else {
-    Write-Host "  The above $($Stats.TotalMatched) files will be MOVED to:" -ForegroundColor White
-    Write-Host "  $DestinationFolder" -ForegroundColor Cyan
+    Write-Host "  Destination: $DestinationFolder" -ForegroundColor White
     Write-Host ""
-    Write-Host ("  " + ("!" * 55)) -ForegroundColor Red
-    Write-Host "  Type YES (all caps) to confirm the move:" -ForegroundColor Yellow
-    Write-Host ("  " + ("!" * 55)) -ForegroundColor Red
+    Write-Host ("  " + ("!" * 60)) -ForegroundColor Red
+    Write-Host "  $($Stats.TotalMatched) files ($(Format-FileSize -Bytes $previewBytes)) will be MOVED." -ForegroundColor Yellow
+    Write-Host "  Type  MOVE  to confirm, or press ENTER to cancel:" -ForegroundColor Yellow
+    Write-Host ("  " + ("!" * 60)) -ForegroundColor Red
     Write-Host ""
     $confirm = Read-Host "  Confirm"
-    if ($confirm.Trim() -ne "YES") {
+    if ($confirm.Trim().ToUpper() -ne "MOVE") {
         Write-Log "Operation cancelled by user (typed: '$confirm')." "WARNING"
         Save-Log
         exit 0
     }
-    Write-Log "User confirmed the move operation." "SUCCESS"
+    Write-Log "User confirmed with MOVE." "SUCCESS"
 }
 
 # ----------------------------------------------------------
 #  STEP 6 : MOVE FILES
 # ----------------------------------------------------------
 
-$modeLabel = if ($IsDryRun) { "[DRY-RUN] SIMULATING MOVE" } else { "MOVING FILES" }
-Write-Section $modeLabel
+$sectionLabel = if ($IsDryRun) { "[DRY-RUN] SIMULATING MOVE" } else { "MOVING FILES" }
+Write-Section $sectionLabel
 
 $totalToMove  = $Stats.TotalMatched
 $currentIndex = 0
@@ -473,11 +519,11 @@ foreach ($name in $SearchNames) {
     foreach ($file in $MatchedFiles[$name]) {
 
         $currentIndex++
-        $pct = [int](($currentIndex / $totalToMove) * 100)
+        $pct           = [int](($currentIndex / $totalToMove) * 100)
         $progressLabel = if ($IsDryRun) { "[DRY-RUN] Simulating" } else { "Moving" }
         Write-Progress `
             -Activity "$progressLabel files" `
-            -Status   "$currentIndex of $totalToMove : $($file.Name)" `
+            -Status   "$currentIndex of $totalToMove : $($file.Name)  ($(Format-FileSize -Bytes $file.Length))" `
             -PercentComplete $pct
 
         $destPath   = Join-Path $DestinationFolder $file.Name
@@ -485,29 +531,30 @@ foreach ($name in $SearchNames) {
 
         # Safety: never move a file onto itself
         if ($destPath -eq $file.FullName) {
-            Write-Log "SKIPPED (source equals destination): $($file.FullName)" "WARNING"
+            Write-Log "SKIPPED (source = destination): $($file.FullName)" "WARNING"
             Add-CsvRow -SearchName $name -FileName $file.Name `
                        -SourcePath $file.FullName -DestinationPath $destPath `
-                       -Status "SKIPPED_SELF" -Notes "Source and destination are identical"
+                       -Status "SKIPPED_SELF" -SizeBytes $file.Length `
+                       -Notes "Source and destination are identical"
             $Stats.TotalFailed++
             continue
         }
 
-        # Handle duplicate filename at destination
+        # Duplicate handling
         if (Test-Path -LiteralPath $destPath) {
             $destPath   = Get-TimestampedDestPath -DestPath $destPath
             $renamedDup = $true
             $Stats.TotalRenamedDup++
-            Write-Log "Duplicate handled: '$($file.Name)' -> '$(Split-Path $destPath -Leaf)'" "WARNING"
+            Write-Log "Duplicate -> renamed to: $(Split-Path $destPath -Leaf)" "WARNING"
         }
 
         $dupNote = if ($renamedDup) { "Renamed - duplicate existed in destination" } else { "" }
 
         if ($IsDryRun) {
-            Write-Log "[DRY-RUN] WOULD MOVE: $($file.FullName)  ->  $destPath" "SUCCESS"
+            Write-Log "[DRY-RUN] WOULD MOVE: $($file.FullName)  ->  $destPath  ($(Format-FileSize -Bytes $file.Length))" "DRYRUN"
             Add-CsvRow -SearchName $name -FileName $file.Name `
                        -SourcePath $file.FullName -DestinationPath $destPath `
-                       -Status "DRY_RUN" -Notes $dupNote
+                       -Status "DRY_RUN" -SizeBytes $file.Length -Notes $dupNote
             $Stats.TotalSimulated++
 
         } else {
@@ -517,31 +564,32 @@ foreach ($name in $SearchNames) {
                     Write-Log "MOVED: $($file.FullName)  ->  $destPath" "SUCCESS"
                     Add-CsvRow -SearchName $name -FileName $file.Name `
                                -SourcePath $file.FullName -DestinationPath $destPath `
-                               -Status "MOVED" -Notes $dupNote
+                               -Status "MOVED" -SizeBytes $file.Length -Notes $dupNote
                     $Stats.TotalMoved++
+                    $Stats.TotalBytesMoved += $file.Length
                 }
                 catch [System.IO.IOException] {
                     $errMsg = $_.Exception.Message
-                    Write-Log "LOCKED/IO ERROR: $($file.FullName) | $errMsg" "ERROR"
+                    Write-Log "LOCKED/IO: $($file.FullName) | $errMsg" "ERROR"
                     Add-CsvRow -SearchName $name -FileName $file.Name `
                                -SourcePath $file.FullName -DestinationPath $destPath `
-                               -Status "FAILED_LOCKED" -Notes $errMsg
+                               -Status "FAILED_LOCKED" -SizeBytes $file.Length -Notes $errMsg
                     $Stats.TotalFailed++
                 }
                 catch [System.UnauthorizedAccessException] {
                     $errMsg = $_.Exception.Message
-                    Write-Log "PERMISSION ERROR: $($file.FullName) | $errMsg" "ERROR"
+                    Write-Log "PERMISSION: $($file.FullName) | $errMsg" "ERROR"
                     Add-CsvRow -SearchName $name -FileName $file.Name `
                                -SourcePath $file.FullName -DestinationPath $destPath `
-                               -Status "FAILED_PERMISSION" -Notes $errMsg
+                               -Status "FAILED_PERMISSION" -SizeBytes $file.Length -Notes $errMsg
                     $Stats.TotalFailed++
                 }
                 catch {
                     $errMsg = $_.Exception.Message
-                    Write-Log "UNEXPECTED ERROR: $($file.FullName) | $errMsg" "ERROR"
+                    Write-Log "ERROR: $($file.FullName) | $errMsg" "ERROR"
                     Add-CsvRow -SearchName $name -FileName $file.Name `
                                -SourcePath $file.FullName -DestinationPath $destPath `
-                               -Status "FAILED_UNKNOWN" -Notes $errMsg
+                               -Status "FAILED_UNKNOWN" -SizeBytes $file.Length -Notes $errMsg
                     $Stats.TotalFailed++
                 }
             }
@@ -552,65 +600,102 @@ foreach ($name in $SearchNames) {
 Write-Progress -Activity "Moving files" -Completed
 
 # ----------------------------------------------------------
-#  STEP 7 : SUMMARY
+#  STEP 7 : SUMMARY BOX
 # ----------------------------------------------------------
 
-$EndTime  = Get-Date
-$Duration = $EndTime - $StartTime
-
-Write-Section "SUMMARY"
-
+$EndTime   = Get-Date
+$Duration  = $EndTime - $StartTime
 $modeLabel = if ($IsDryRun) { "DRY-RUN (simulation - nothing was moved)" } else { "LIVE" }
 
-$summaryBlock = @"
-
-  Run mode          : $modeLabel
-  Start time        : $($StartTime.ToString('yyyy-MM-dd HH:mm:ss'))
-  End time          : $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))
-  Duration          : $([int]$Duration.TotalSeconds) second(s)
-
-  Names requested   : $($Stats.TotalRequested)
-  Files matched     : $($Stats.TotalMatched)
-  Files moved(live) : $($Stats.TotalMoved)
-  Files simulated   : $($Stats.TotalSimulated)
-  Files failed      : $($Stats.TotalFailed)
-  Names not found   : $($Stats.TotalNotFound)
-  Duplicates renamed: $($Stats.TotalRenamedDup)
-
-  Destination       : $DestinationFolder
-  Log file          : $LogFilePath
-  CSV report        : $CsvFilePath
-"@
-
-$script:LogLines.Add($summaryBlock)
-Write-Host $summaryBlock -ForegroundColor White
+$sep = "=" * 65
+$script:LogLines.Add("")
+$script:LogLines.Add($sep)
+$script:LogLines.Add("   OPERATION SUMMARY")
+$script:LogLines.Add($sep)
 
 Write-Host ""
-Write-Host ("  " + ("-" * 40)) -ForegroundColor DarkGray
-if ($IsDryRun) {
-    Write-Host "  Simulated : $($Stats.TotalSimulated)" -ForegroundColor Yellow
-} else {
-    Write-Host "  Moved     : $($Stats.TotalMoved)" -ForegroundColor Green
+Write-Host $sep                    -ForegroundColor DarkCyan
+Write-Host "   OPERATION SUMMARY"  -ForegroundColor Cyan
+Write-Host $sep                    -ForegroundColor DarkCyan
+
+$summaryLines = @(
+    "  Run mode            : $modeLabel",
+    "  Server              : $env:COMPUTERNAME",
+    "  Start time          : $($StartTime.ToString('yyyy-MM-dd HH:mm:ss'))",
+    "  End time            : $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))",
+    "  Duration            : $([int]$Duration.TotalSeconds) second(s)",
+    "",
+    "  Requested companies : $($Stats.TotalRequested)",
+    "  Matched files       : $($Stats.TotalMatched)  ($(Format-FileSize -Bytes $Stats.TotalBytesMatched))",
+    "  Moved successfully  : $($Stats.TotalMoved)  ($(Format-FileSize -Bytes $Stats.TotalBytesMoved))",
+    "  Simulated (dry-run) : $($Stats.TotalSimulated)",
+    "  Failed              : $($Stats.TotalFailed)",
+    "  Not found           : $($Stats.TotalNotFound)",
+    "  Duplicates renamed  : $($Stats.TotalRenamedDup)",
+    "",
+    "  Log  : $LogFilePath",
+    "  CSV  : $CsvFilePath",
+    "  JSON : $JsonFilePath"
+)
+
+foreach ($line in $summaryLines) {
+    $script:LogLines.Add($line)
+    Write-Host $line -ForegroundColor White
 }
+
+Write-Host $sep -ForegroundColor DarkCyan
+Write-Host ""
+
+# Color-coded totals
+$movedColor   = if ($Stats.TotalMoved   -gt 0 -or $Stats.TotalSimulated -gt 0) { "Green"  } else { "White" }
 $failColor    = if ($Stats.TotalFailed   -gt 0) { "Red"    } else { "Green" }
 $missingColor = if ($Stats.TotalNotFound -gt 0) { "Yellow" } else { "Green" }
-Write-Host "  Failed    : $($Stats.TotalFailed)"   -ForegroundColor $failColor
-Write-Host "  Missing   : $($Stats.TotalNotFound)" -ForegroundColor $missingColor
+
+if ($IsDryRun) {
+    Write-Host "  Simulated   : $($Stats.TotalSimulated)" -ForegroundColor Magenta
+} else {
+    Write-Host "  Moved       : $($Stats.TotalMoved)  ($(Format-FileSize -Bytes $Stats.TotalBytesMoved))" -ForegroundColor $movedColor
+}
+Write-Host "  Failed      : $($Stats.TotalFailed)"   -ForegroundColor $failColor
+Write-Host "  Not found   : $($Stats.TotalNotFound)" -ForegroundColor $missingColor
 Write-Host ""
 
 # ----------------------------------------------------------
-#  STEP 8 : SAVE LOG + CSV
+#  STEP 8 : SAVE TXT + CSV + JSON
 # ----------------------------------------------------------
 
 Save-Log
-Write-Log "Log saved : $LogFilePath" "SUCCESS"
+Write-Log "Log  saved : $LogFilePath" "SUCCESS"
 
 try {
     $CsvRows | Export-Csv -Path $CsvFilePath -NoTypeInformation -Encoding UTF8
-    Write-Log "CSV saved : $CsvFilePath" "SUCCESS"
+    Write-Log "CSV  saved : $CsvFilePath" "SUCCESS"
 }
 catch {
-    Write-Log "Could not save CSV report: $_" "ERROR"
+    Write-Log "Could not save CSV: $_" "ERROR"
+}
+
+try {
+    $jsonPayload = [PSCustomObject]@{
+        RunInfo = [PSCustomObject]@{
+            ScriptVersion = "1.3"
+            Server        = $env:COMPUTERNAME
+            Mode          = $modeLabel
+            StartTime     = $StartTime.ToString("yyyy-MM-dd HH:mm:ss")
+            EndTime       = $EndTime.ToString("yyyy-MM-dd HH:mm:ss")
+            DurationSec   = [int]$Duration.TotalSeconds
+            Destination   = $DestinationFolder
+        }
+        SearchNames = $SearchNames.ToArray()
+        Summary     = $Stats
+        Files       = $JsonRows.ToArray()
+    }
+    $jsonPayload | ConvertTo-Json -Depth 5 |
+        Out-File -FilePath $JsonFilePath -Encoding UTF8 -Force
+    Write-Log "JSON saved : $JsonFilePath" "SUCCESS"
+}
+catch {
+    Write-Log "Could not save JSON: $_" "ERROR"
 }
 
 # ----------------------------------------------------------
@@ -627,6 +712,6 @@ if ($openLog.Trim().ToUpper() -eq "Y") {
 
 Write-Host ""
 Write-Host ("=" * 65) -ForegroundColor DarkCyan
-Write-Host "  Script finished." -ForegroundColor Cyan
+Write-Host "  Done." -ForegroundColor Cyan
 Write-Host ("=" * 65) -ForegroundColor DarkCyan
 Write-Host ""
