@@ -494,10 +494,11 @@ function Reset-State {
 }
 
 function Get-NamesFromTextBox {
-    return $txtNames.Text -split "`r?`n" |
-           ForEach-Object { $_.Trim() } |
-           Where-Object   { $_ -ne ""  } |
-           Sort-Object -Unique
+    # @() guarantees array return even when pipeline yields nothing or one item
+    return @($txtNames.Text -split "`r?`n" |
+             ForEach-Object { $_.Trim() } |
+             Where-Object   { $_ -ne ""  } |
+             Sort-Object -Unique)
 }
 
 # ============================================================
@@ -517,14 +518,14 @@ $form.add_Load({
 # ============================================================
 
 $btnScan.add_Click({
-    $names = Get-NamesFromTextBox
+    [array]$names = @(Get-NamesFromTextBox)
     if ($names.Count -eq 0) {
         Set-Status $H.StatusNoNames
         return
     }
 
     Reset-State
-    $state.SearchNames = $names
+    $state.SearchNames = [string[]]$names
     Set-Busy $true
     Set-Status $H.StatusScanning
 

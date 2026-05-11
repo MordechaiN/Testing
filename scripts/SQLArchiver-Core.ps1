@@ -41,7 +41,7 @@ function Format-FileSize {
 
 function Build-MatchRegex {
     param([string[]]$Names)
-    $combined = ($Names | ForEach-Object { [regex]::Escape($_) }) -join "|"
+    $combined = (@($Names) | ForEach-Object { [regex]::Escape($_) }) -join "|"
     return [regex]::new(
         "^($combined)$",
         [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
@@ -56,7 +56,7 @@ function Build-MatchRegex {
 function Get-MatchedSearchName {
     param([string]$BaseName, [string[]]$SearchNames)
     $cmp = [System.StringComparer]::OrdinalIgnoreCase
-    foreach ($n in $SearchNames) {
+    foreach ($n in @($SearchNames)) {
         if ($cmp.Equals($BaseName, $n)) { return $n }
     }
     return $null
@@ -438,7 +438,7 @@ function Write-Manifest {
 
     try {
         $path   = Join-Path $script:DestinationFolder "_manifest_$RunTimestamp.json"
-        $moved  = $MoveSummary.FileResults | Where-Object { $_.Status -eq "MOVED" }
+        $moved  = @($MoveSummary.FileResults | Where-Object { $_.Status -eq "MOVED" })
         [PSCustomObject]@{
             RunId          = $MoveSummary.RunId
             MoveDate       = $MoveSummary.EndTime.ToString("yyyy-MM-dd HH:mm:ss")
