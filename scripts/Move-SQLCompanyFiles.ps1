@@ -164,9 +164,10 @@ function Build-MatchRegex {
     param([string[]]$Names)
     $escaped  = $Names | ForEach-Object { [regex]::Escape($_) }
     $combined = $escaped -join "|"
-    # ^(NAME1|NAME2|NAME3)(_.*)?$
+    # ^(NAME1|NAME2|NAME3)$  — exact base-name match only
+    # ABC.bak  ✓   ABC_log.ldf  ✗   ABC123.bak  ✗
     return [regex]::new(
-        "^($combined)(_.*)?$",
+        "^($combined)$",
         [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
         [System.Text.RegularExpressions.RegexOptions]::Compiled
     )
@@ -182,10 +183,10 @@ function Get-MatchedName {
         [string]$BaseName,
         [string[]]$SearchNames
     )
+    # Exact match only: base name (without extension) must equal the search term
+    $cmp = [System.StringComparer]::OrdinalIgnoreCase
     foreach ($name in $SearchNames) {
-        $cmp = [System.StringComparer]::OrdinalIgnoreCase
-        if ($cmp.Equals($BaseName, $name) -or
-            $BaseName.StartsWith($name + "_", [System.StringComparison]::OrdinalIgnoreCase)) {
+        if ($cmp.Equals($BaseName, $name)) {
             return $name
         }
     }
