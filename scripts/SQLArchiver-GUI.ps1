@@ -233,9 +233,7 @@ $form.Controls.Add($layout)
 $split = New-Object System.Windows.Forms.SplitContainer
 $split.Dock          = [System.Windows.Forms.DockStyle]::Fill
 $split.SplitterWidth = 5
-$split.Panel1MinSize = 180
-$split.Panel2MinSize = 180
-# SplitterDistance set in Load event after form is laid out
+# Panel1MinSize / Panel2MinSize / SplitterDistance all set in Load event
 $layout.Controls.Add($split, 0, 0)
 
 # ------ LEFT : Company name input ------
@@ -507,7 +505,11 @@ function Get-NamesFromTextBox {
 # ============================================================
 
 $form.add_Load({
-    try { $split.SplitterDistance = 270 } catch {}
+    try {
+        $split.SplitterDistance = [int]($form.ClientSize.Width * 0.35)
+        $split.Panel1MinSize    = 180
+        $split.Panel2MinSize    = 180
+    } catch {}
 })
 
 # ============================================================
