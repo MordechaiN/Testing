@@ -322,3 +322,24 @@ describe('review fixes (UI)', () => {
     expect(within(head).getByText('12/09/2027')).toBeTruthy();
   });
 });
+
+describe('browser compatibility', () => {
+  it('switching screens works when scrollTo() returns a Promise (Chrome 154+)', async () => {
+    const user = userEvent.setup();
+    const original = window.scrollTo;
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    window.scrollTo = (() => Promise.resolve()) as unknown as typeof window.scrollTo;
+    try {
+      render(<App />);
+      await user.click(nav('הזנת נתונים'));
+      await user.click(nav('פרטים ותנאים'));
+      await user.click(nav('סיכום והשוואה'));
+      expect(document.querySelector('main')).not.toBeNull();
+      expect(region(/^קבוצה A – זוג \+ תינוק$/)).toBeTruthy();
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      window.scrollTo = original;
+      errors.mockRestore();
+    }
+  });
+});

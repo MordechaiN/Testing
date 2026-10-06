@@ -19,7 +19,10 @@ export function App() {
   const [saved, setSaved] = useState(true);
 
   // Autosave on every change.
-  useEffect(() => setSaved(saveState(state)), [state]);
+  // Effects use block bodies on purpose: an effect must return nothing (or a cleanup function).
+  useEffect(() => {
+    setSaved(saveState(state));
+  }, [state]);
 
   // Another tab saved newer data: take it, so this tab never overwrites it with stale data.
   useEffect(() => {
@@ -29,7 +32,11 @@ export function App() {
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
   }, []);
-  useEffect(() => window.scrollTo?.({ top: 0 }), [screen]);
+  // Newer browsers (Chrome 15x) return a Promise from scrollTo(); returning it from the effect
+  // would make React call it as a cleanup function and crash the app on the next screen change.
+  useEffect(() => {
+    window.scrollTo?.({ top: 0 });
+  }, [screen]);
 
   const ctx = useMemo(() => ({ state, dispatch, go: setScreen }), [state]);
 
