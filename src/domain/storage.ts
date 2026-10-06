@@ -1,5 +1,5 @@
 import { passengerSlots } from './calc';
-import { emptyPlan, initialState, initialTerms, plansFor } from './seed';
+import { applySeeds, emptyFlight, emptyHotel, emptyPlan, freshState, initialState, initialTerms, plansFor } from './seed';
 import type {
   AppState,
   Cruise,
@@ -63,6 +63,8 @@ function planFrom(raw: unknown): Plan {
     backFlightId: idOrNull(p.backFlightId),
     hotelId: idOrNull(p.hotelId),
     noHotel: p.noHotel === true,
+    hotelAfterId: idOrNull(p.hotelAfterId),
+    noHotelAfter: p.noHotelAfter === true,
     tips: money(p.tips),
     tipsMode: p.tipsMode === 'person' ? 'person' : 'group',
     tipsPeople: money(p.tipsPeople),
@@ -112,6 +114,7 @@ function migrateV1(raw: Obj): Obj | null {
       const id = `${f.id}-${g}`;
       flightMap[g][f.id] = id;
       flights.push({
+        ...emptyFlight(str(f.cruiseId), g, f.direction === 'back' ? 'back' : 'out'),
         id,
         cruiseId: str(f.cruiseId),
         group: g,
@@ -150,6 +153,7 @@ function migrateV1(raw: Obj): Obj | null {
       const id = owners.length > 1 ? `${h.id}-${g}` : h.id;
       hotelMap[g][h.id] = id;
       hotels.push({
+        ...emptyHotel(str(h.cruiseId), g),
         id,
         cruiseId: str(h.cruiseId),
         owner: g,
@@ -230,9 +234,20 @@ function flightFrom(f: Obj): Flight | null {
     returnStops: money(f.returnStops),
     returnDuration: str(f.returnDuration),
     baggageInfo: str(f.baggageInfo),
+    fareType: str(f.fareType),
     fare: prices(f.fare),
     seat: prices(f.seat),
     baggage: prices(f.baggage),
+    cartTotal: money(f.cartTotal),
+    fareOut: money(f.fareOut),
+    fareBack: money(f.fareBack),
+    changeTerms: str(f.changeTerms),
+    cancelTerms: str(f.cancelTerms),
+    source: str(f.source),
+    sourceUrl: str(f.sourceUrl),
+    checkedAt: str(f.checkedAt),
+    verified: f.verified !== false,
+    benchmark: f.benchmark === true,
     notes: str(f.notes),
   };
 }
@@ -248,6 +263,9 @@ function hotelFrom(h: Obj): Hotel | null {
     id: h.id,
     cruiseId: str(h.cruiseId),
     owner: owner(h.owner),
+    phase: h.phase === 'after' ? 'after' : 'before',
+    address: str(h.address),
+    currency: h.currency === 'EUR' || h.currency === 'ILS' ? h.currency : 'USD',
     split: h.split === 'custom' ? 'custom' : 'half',
     shareA: money(h.shareA),
     name: str(h.name),
@@ -258,7 +276,12 @@ function hotelFrom(h: Obj): Hotel | null {
     taxes: money(h.taxes),
     cityTax: money(h.cityTax),
     breakfast: money(h.breakfast),
+    resortFee: money(h.resortFee),
     other: money(h.other),
+    usdTotal: money(h.usdTotal),
+    url: str(h.url),
+    source: str(h.source),
+    checkedAt: str(h.checkedAt),
     notes: str(h.notes),
   };
 }
@@ -284,7 +307,8 @@ export function normalizeState(input: unknown): AppState | null {
   if (!isObject(input)) return null;
   let raw: Obj | null = input;
   if (raw.version === 1) raw = migrateV1(raw);
-  if (!raw || raw.version !== 2) return null;
+  // Version 2 saves are read by the same code: the fields added in version 3 get safe defaults below.
+  if (!raw || (raw.version !== 2 && raw.version !== 3)) return null;
 
   const cs = cruises(raw.cruises);
   if (!cs || !Array.isArray(raw.flights) || !Array.isArray(raw.hotels)) return null;
@@ -312,8 +336,9 @@ export function normalizeState(input: unknown): AppState | null {
   const cruiseIds = new Set(cs.map((c) => c.id));
   const favOf = (g: GroupId) => (typeof fav[g] === 'string' && cruiseIds.has(fav[g] as string) ? (fav[g] as string) : null);
 
-  return {
-    version: 2,
+  const seeds = isObject(raw.seeds) ? raw.seeds : {};
+  return applySeeds({
+    version: 3,
     groupBEnabled: raw.groupBEnabled !== false,
     passengers: {
       A: passengers(rawPassengers.A, base.passengers.A),
@@ -330,7 +355,8 @@ export function normalizeState(input: unknown): AppState | null {
     deposit: { A: money(dep.A), B: money(dep.B) },
     terms,
     notes: str(raw.notes),
-  };
+    seeds: { elAlBenchmark: seeds.elAlBenchmark === true },
+  });
 }
 
 export function loadState(): AppState {
@@ -338,9 +364,9 @@ export function loadState(): AppState {
   try {
     text = localStorage.getItem(STORAGE_KEY);
   } catch {
-    return initialState(); // storage blocked – the app still works, without autosave
+    return freshState(); // storage blocked – the app still works, without autosave
   }
-  if (!text) return initialState();
+  if (!text) return freshState();
   try {
     const parsed = normalizeState(JSON.parse(text));
     if (parsed) return parsed;
@@ -353,7 +379,7 @@ export function loadState(): AppState {
   } catch {
     // nothing more we can do
   }
-  return initialState();
+  return freshState();
 }
 
 export function saveState(state: AppState): boolean {

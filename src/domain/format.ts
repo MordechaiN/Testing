@@ -1,6 +1,6 @@
 import { ltr, shortDate } from './dates';
-import type { Flight, GroupId, Owner, Passengers } from './types';
-import { flightCost } from './calc';
+import type { Currency, Flight, GroupId, Hotel, Owner, Passengers } from './types';
+import { flightCost, hotelNativeCost } from './calc';
 
 /** 4805 -> "4,805", 1234.5 -> "1,234.50" */
 export function fmt(n: number): string {
@@ -66,4 +66,24 @@ export function flightPriceText(f: Flight, pax: Passengers): string {
   const c = flightCost(f, pax);
   if (!c.fareEntered) return 'חסר מחיר';
   return `טיסה ${usd(c.fare)}${c.missingAdultFare.length > 0 ? ' (חלקי)' : ''}`;
+}
+
+/** "כן" when every leg is known to be direct, "לא" when any leg has stops, "—" when unknown. */
+export function directLabel(f: Flight): string {
+  const stops = f.direction === 'round' ? [f.stops, f.returnStops] : [f.stops];
+  if (stops.some((x) => x !== null && x > 0)) return 'לא';
+  if (stops.every((x) => x === 0)) return 'כן';
+  return '—';
+}
+
+export function passengersLabel(p: Passengers): string {
+  return `${p.adults} מבוגרים${p.infants > 0 ? ` + ${p.infants === 1 ? 'תינוק' : `${p.infants} תינוקות`}` : ''}`;
+}
+
+export const CURRENCY_SYMBOL: Record<Currency, string> = { USD: '$', EUR: '€', ILS: '₪' };
+
+/** The hotel total in its own currency, e.g. "€300". */
+export function hotelNativeText(h: Hotel): string {
+  const symbol = CURRENCY_SYMBOL[h.currency ?? 'USD'];
+  return `${symbol}${fmt(hotelNativeCost(h))}`;
 }

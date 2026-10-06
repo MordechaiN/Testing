@@ -1,13 +1,16 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
 import { saveState } from '../src/domain/storage';
-import { fullScenario } from './helpers';
+import { fresh, fullScenario } from './helpers';
 
 const nav = (name: string) => screen.getByRole('button', { name });
 const region = (name: RegExp) => screen.getByRole('region', { name });
 const strip = (s: string | null) => (s ?? '').replace(/[⁦⁩]/g, '');
+
+// Most tests start from the base data without the built-in EL AL cart (the cart has its own tests below).
+beforeEach(() => saveState(fresh()));
 
 /** The main entry form of a group (not the agent-price list). */
 function groupCard(group: 'A' | 'B'): HTMLElement {
@@ -67,7 +70,7 @@ describe('summary screen', () => {
     const radios = within(a).getAllByRole('radio');
     await user.click(radios[1]!); // 05/09 – central park $5,280
     const totalRow = within(a).getByRole('row', { name: /סה״כ/ });
-    expect(within(totalRow).getByText('$5,280')).toBeTruthy();
+    expect(within(totalRow).getAllByText('$5,280').length).toBeGreaterThan(0);
     expect(b.textContent).toBe(bBefore);
   });
 
@@ -99,12 +102,12 @@ describe('summary screen', () => {
     render(<App />);
     const totalA = within(region(/^קבוצה A – זוג \+ תינוק$/)).getByRole('row', { name: /סה״כ/ });
     const totalB = within(region(/^קבוצה B – זוג$/)).getByRole('row', { name: /סה״כ/ });
-    expect(within(totalA).getByText('$7,392')).toBeTruthy();
-    expect(within(totalB).getByText('$7,090')).toBeTruthy();
+    expect(within(totalA).getAllByText('$7,392').length).toBeGreaterThan(0);
+    expect(within(totalB).getAllByText('$7,090').length).toBeGreaterThan(0);
     expect(strip(region(/בקצרה/).textContent)).toContain('$14,482'); // A + B, secondary only
     await user.click(screen.getByRole('button', { name: /לא – רק קבוצה A/ }));
     const totalAOff = within(region(/^קבוצה A – זוג \+ תינוק$/)).getByRole('row', { name: /סה״כ/ });
-    expect(within(totalAOff).getByText('$7,392')).toBeTruthy();
+    expect(within(totalAOff).getAllByText('$7,392').length).toBeGreaterThan(0);
     expect(screen.queryByText('$7,090')).toBeNull();
   });
 
@@ -115,9 +118,9 @@ describe('summary screen', () => {
     render(<App />);
     const a = region(/^קבוצה A – זוג \+ תינוק$/);
     const totalRow = () => within(a).getByRole('row', { name: /סה״כ/ });
-    expect(within(totalRow()).getByText('$6,412')).toBeTruthy(); // 7,392 - (770 + 70 + 140)
+    expect(within(totalRow()).getAllByText('$6,412').length).toBeGreaterThan(0); // 7,392 - (770 + 70 + 140)
     await user.selectOptions(within(a).getAllByLabelText(/^טיסת הלוך – זוג \+ תינוק/)[0]!, ids.aOut!);
-    expect(within(totalRow()).getByText('$7,392')).toBeTruthy();
+    expect(within(totalRow()).getAllByText('$7,392').length).toBeGreaterThan(0);
   });
 });
 
@@ -174,11 +177,11 @@ describe('entry screen', () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(nav('הזנת נתונים'));
-    await user.click(screen.getByRole('button', { name: '+ הוסף מלון' }));
+    await user.click(screen.getByRole('button', { name: '+ מלון לפני הקרוז' }));
     const card = document.querySelector('.hotel-card') as HTMLElement;
     await user.selectOptions(within(card).getByLabelText('שייך ל'), 'both');
-    await user.type(within(card).getByLabelText('מספר לילות'), '2');
-    await user.type(within(card).getByLabelText('מחיר ללילה'), '300');
+    expect(within(card).getByText(/2 \(לפי התאריכים\)/)).toBeTruthy(); // the planned dates 03/09 → 05/09 are pre-filled
+    await user.type(within(card).getByLabelText(/^מחיר ללילה/), '300');
     expect(strip(card.textContent)).toContain('קבוצה A: $300 · קבוצה B: $300');
   });
 
@@ -246,7 +249,7 @@ describe('details screen', () => {
     await user.upload(input, new File([good], 'backup.json', { type: 'application/json' }));
     expect(await screen.findByText('הגיבוי נטען.')).toBeTruthy();
     await user.click(nav('סיכום והשוואה'));
-    expect(within(within(region(/^קבוצה A – זוג \+ תינוק$/)).getByRole('row', { name: /סה״כ/ })).getByText('$7,392')).toBeTruthy();
+    expect(within(within(region(/^קבוצה A – זוג \+ תינוק$/)).getByRole('row', { name: /סה״כ/ })).getAllByText('$7,392').length).toBeGreaterThan(0);
     vi.restoreAllMocks();
   });
 });
@@ -341,5 +344,97 @@ describe('browser compatibility', () => {
       window.scrollTo = original;
       errors.mockRestore();
     }
+  });
+});
+
+describe('EL AL cart, flight comparison and hotels (UI)', () => {
+  beforeEach(() => localStorage.clear()); // a brand-new user: the cart is part of the starting data
+
+  it('the first screen already shows the EL AL round trip: $915.96, ⭐, with the reasons', () => {
+    render(<App />);
+    const flights = region(/השוואת טיסות/);
+    expect(within(flights).getAllByText('$915.96').length).toBeGreaterThan(0);
+    expect(within(flights).getAllByText(/Benchmark/).length).toBeGreaterThan(0);
+    expect(within(flights).getByText(/ישירה בשני הכיוונים · מגיעה יומיים לפני הקרוז · חוזרת יומיים אחרי הירידה/)).toBeTruthy();
+    expect(within(flights).getAllByText(/⭐ מומלץ/).length).toBeGreaterThan(0);
+    expect(within(flights).getByText(/לא מחיר מובטח/)).toBeTruthy();
+  });
+
+  it('group B has the derived price, marked unverified, and is not selected', () => {
+    render(<App />);
+    const flights = region(/השוואת טיסות/);
+    expect(within(flights).getAllByText('$837.76').length).toBeGreaterThan(0);
+    expect(within(flights).getAllByText(/לא מאומת/).length).toBeGreaterThan(0);
+    const b = region(/^קבוצה B – זוג$/);
+    expect(within(b).queryByText('$837.76')).toBeNull();
+  });
+
+  it('choosing a room adds cruise + the cart price exactly once: $4,805 + $915.96 = $5,720.96', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const a = region(/^קבוצה A – זוג \+ תינוק$/);
+    await user.click(within(a).getAllByRole('radio')[0]!);
+    const total = within(a).getByRole('row', { name: /סה״כ/ });
+    expect(within(total).getAllByText('$5,720.96').length).toBeGreaterThan(0);
+    expect(within(total).queryByText('$6,636.92')).toBeNull();
+  });
+
+  it('shows the trip route for 05/09: flight, cruise, flight home', () => {
+    render(<App />);
+    const a = region(/^קבוצה A – זוג \+ תינוק$/);
+    const route = within(a).getByRole('rowheader', { name: 'מסלול' }).closest('tr') as HTMLElement;
+    const text = strip(route.textContent);
+    expect(text).toContain('03/09');
+    expect(text).toContain('05/09–12/09');
+    expect(text).toContain('🚢');
+    expect(text).toContain('14/09');
+  });
+
+  it('says "too early to choose" and lists what is missing, per group', () => {
+    render(<App />);
+    const rec = region(/האפשרות המומלצת/);
+    expect(within(rec).getAllByText(/עדיין מוקדם לבחור/)).toHaveLength(2);
+    expect(within(rec).getAllByText(/טיפים/).length).toBeGreaterThan(0);
+  });
+
+  it('✏️ edit on a flight opens the entry screen on that flight', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const flights = region(/השוואת טיסות/);
+    await user.click(within(flights).getAllByRole('button', { name: /✏️ עריכה/ })[0]!);
+    expect(screen.getByRole('tab', { selected: true }).textContent).toContain('05/09');
+    const card = document.querySelector('#card-bench-elal-A') as HTMLElement;
+    expect(within(card).getByLabelText('סה״כ הכרטיס כפי שמופיע בעגלה ($)')).toBeTruthy();
+    expect((within(card).getByLabelText('סה״כ הכרטיס כפי שמופיע בעגלה ($)') as HTMLInputElement).value).toBe('915.96');
+  });
+
+  it('selecting a flight for a group in the comparison table changes its total', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const a = region(/^קבוצה A – זוג \+ תינוק$/);
+    await user.click(within(a).getAllByRole('radio')[0]!);
+    const flights = region(/השוואת טיסות/);
+    await user.click(within(flights).getAllByRole('button', { name: '✓ נבחרה' })[0]!); // deselect
+    expect(within(within(a).getByRole('row', { name: /סה״כ/ })).getAllByText('$4,805').length).toBeGreaterThan(0);
+  });
+
+  it('adding a hotel with 2 nights adds to the total; a euro hotel waits for a USD amount', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(nav('הזנת נתונים'));
+    const form = groupCard('A');
+    await user.selectOptions(within(form).getByLabelText(/^חדר – זוג \+ תינוק/), 'c1-A1');
+    await user.click(within(form).getAllByRole('button', { name: '+ מלון חדש' })[0]!);
+    const card = document.querySelector('.hotel-card') as HTMLElement;
+    expect(within(card).getAllByText(/לפני הקרוז/).length).toBeGreaterThan(0);
+    await user.type(within(card).getByLabelText(/^מחיר ללילה/), '150');
+    expect(strip(form.querySelector('.total-lines')!.textContent)).toContain('מלון בברצלונה לפני הקרוז: $300');
+    expect(within(form).getAllByText('$6,020.96').length).toBeGreaterThan(0); // 4,805 + 915.96 + 300
+
+    await user.selectOptions(within(card).getByLabelText('מטבע'), 'EUR');
+    expect(within(card).getByLabelText('מחיר כולל לאחר המרה ל-USD ($)')).toBeTruthy();
+    expect(strip(form.querySelector('.total-lines')!.textContent)).toContain('מלון בברצלונה לפני הקרוז: טרם הוזן');
+    await user.type(within(card).getByLabelText('מחיר כולל לאחר המרה ל-USD ($)'), '330');
+    expect(within(form).getAllByText('$6,050.96').length).toBeGreaterThan(0); // 4,805 + 915.96 + 330
   });
 });

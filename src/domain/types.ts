@@ -61,11 +61,37 @@ export interface Flight {
   returnStops: number | null;
   returnDuration: string;
   baggageInfo: string;
+  /** Fare class, e.g. "Lite (N) outbound / Lite (U) return". */
+  fareType: string;
   fare: PersonPrices;
   seat: PersonPrices;
   baggage: PersonPrices;
+  /**
+   * Total fare of the whole ticket for this group exactly as the airline's cart shows it (USD).
+   * When filled it is the source of truth and replaces the sum of the per-person fares.
+   */
+  cartTotal: Money;
+  /** Informational split of a round-trip price (never added on top of the total). */
+  fareOut: Money;
+  fareBack: Money;
+  changeTerms: string;
+  cancelTerms: string;
+  /** Where the price came from, e.g. "EL AL website cart". */
+  source: string;
+  sourceUrl: string;
+  /** ISO date the price was looked at. A checked price is not a guaranteed price. */
+  checkedAt: string;
+  /** false = price could not be verified; it is shown but never used as a firm offer. */
+  verified: boolean;
+  /** Reference offer the other options are compared against. */
+  benchmark: boolean;
   notes: string;
 }
+
+export type Currency = 'USD' | 'EUR' | 'ILS';
+export const CURRENCIES: readonly Currency[] = ['USD', 'EUR', 'ILS'];
+
+export type HotelPhase = 'before' | 'after';
 
 /** Who pays: one group, or both groups together (then the cost is split). */
 export type Owner = GroupId | 'both';
@@ -74,6 +100,10 @@ export interface Hotel {
   id: string;
   cruiseId: string;
   owner: Owner;
+  /** Stay before the cruise (arrival) or after it (before the flight home). */
+  phase: HotelPhase;
+  address: string;
+  currency: Currency;
   /** Only for owner 'both': 'half' = 50/50, 'custom' = group A pays shareA, group B pays the rest. */
   split: 'half' | 'custom';
   shareA: Money;
@@ -87,7 +117,14 @@ export interface Hotel {
   taxes: Money;
   cityTax: Money;
   breakfast: Money;
+  /** Resort / destination fee, if any (total for the stay). */
+  resortFee: Money;
   other: Money;
+  /** Total in USD after conversion. Required when the currency is not USD – no rate is ever invented. */
+  usdTotal: Money;
+  url: string;
+  source: string;
+  checkedAt: string;
   notes: string;
 }
 
@@ -115,6 +152,9 @@ export interface Plan {
   hotelId: string | null;
   /** The group decided it does not need a hotel (different from "not decided yet"). */
   noHotel: boolean;
+  /** Hotel after the cruise (stay before flying home). */
+  hotelAfterId: string | null;
+  noHotelAfter: boolean;
   tips: Money;
   tipsMode: TipsMode;
   /** For tipsMode 'person': how many people pay. null = number of adults in the group. */
@@ -135,10 +175,10 @@ export interface Term {
   note: string;
 }
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export interface AppState {
-  version: 2;
+  version: 3;
   /** When false, group B is hidden everywhere and never calculated into anything. */
   groupBEnabled: boolean;
   passengers: Record<GroupId, Passengers>;
@@ -154,4 +194,6 @@ export interface AppState {
   deposit: Record<GroupId, Money>;
   terms: Term[];
   notes: string;
+  /** Built-in example data that was already added once (so deleting it is respected). */
+  seeds: { elAlBenchmark: boolean };
 }

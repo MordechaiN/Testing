@@ -576,7 +576,7 @@ describe('review fixes', () => {
     const s = run(fresh(), { type: 'addHotel', hotel: h }, plan('c1', 'A', { hotelId: h.id }));
     const r = computePlan(s, 'c1', 'A');
     expect(r.lines.hotel.entered).toBe(false);
-    expect(r.notices.map((n) => n.text)).toContain('מלון – חסר מספר לילות');
+    expect(r.notices.map((n) => n.text)).toContain('מלון לפני הקרוז – חסר מספר לילות');
   });
 
   it('impossible hotel dates are a red problem on the plan itself', () => {

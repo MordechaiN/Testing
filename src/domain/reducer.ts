@@ -1,5 +1,5 @@
 import { flightFitsSlot, hotelServesGroup } from './calc';
-import { initialState, plansFor, uid } from './seed';
+import { freshState, plansFor, uid } from './seed';
 import type {
   AppState,
   Cruise,
@@ -205,18 +205,25 @@ export function reducer(state: AppState, action: Action): AppState {
 
     case 'updateHotel': {
       const hotels = state.hotels.map((h) => (h.id === action.id ? { ...h, ...action.patch } : h));
-      // If the hotel stopped serving a group, that group must not keep it selected.
+      // If the hotel stopped serving a group (or changed phase), that group must not keep it selected.
+      const hotel = hotels.find((h) => h.id === action.id);
       return mapAllPlans({ ...state, hotels }, (p, _cruiseId, group) => {
-        if (p.hotelId !== action.id) return p;
-        const hotel = hotels.find((h) => h.id === action.id);
-        return hotel && hotelServesGroup(hotel, group) ? p : { ...p, hotelId: null };
+        const fits = (phase: 'before' | 'after') =>
+          !!hotel && hotelServesGroup(hotel, group) && (hotel.phase ?? 'before') === phase;
+        return {
+          ...p,
+          hotelId: p.hotelId === action.id && !fits('before') ? null : p.hotelId,
+          hotelAfterId: p.hotelAfterId === action.id && !fits('after') ? null : p.hotelAfterId,
+        };
       });
     }
 
     case 'removeHotel':
-      return mapAllPlans({ ...state, hotels: state.hotels.filter((h) => h.id !== action.id) }, (p) =>
-        p.hotelId === action.id ? { ...p, hotelId: null } : p,
-      );
+      return mapAllPlans({ ...state, hotels: state.hotels.filter((h) => h.id !== action.id) }, (p) => ({
+        ...p,
+        hotelId: p.hotelId === action.id ? null : p.hotelId,
+        hotelAfterId: p.hotelAfterId === action.id ? null : p.hotelAfterId,
+      }));
 
     case 'addItem':
       return { ...state, items: [...state.items, action.item] };
@@ -240,6 +247,6 @@ export function reducer(state: AppState, action: Action): AppState {
       return action.state;
 
     case 'reset':
-      return initialState();
+      return freshState();
   }
 }

@@ -5,7 +5,7 @@ import { DetailsScreen } from './ui/DetailsScreen';
 import { EntryScreen } from './ui/EntryScreen';
 import { SummaryScreen } from './ui/SummaryScreen';
 import { AppContext } from './ui/context';
-import type { Screen } from './ui/context';
+import type { EntryTarget, Screen } from './ui/context';
 
 const TABS: { id: Screen; label: string }[] = [
   { id: 'summary', label: 'סיכום והשוואה' },
@@ -17,6 +17,7 @@ export function App() {
   const [state, dispatch] = useReducer(reducer, undefined, loadState);
   const [screen, setScreen] = useState<Screen>('summary');
   const [saved, setSaved] = useState(true);
+  const [target, setTarget] = useState<EntryTarget | null>(null);
 
   // Autosave on every change.
   // Effects use block bodies on purpose: an effect must return nothing (or a cleanup function).
@@ -38,7 +39,18 @@ export function App() {
     window.scrollTo?.({ top: 0 });
   }, [screen]);
 
-  const ctx = useMemo(() => ({ state, dispatch, go: setScreen }), [state]);
+  const ctx = useMemo(
+    () => ({
+      state,
+      dispatch,
+      target,
+      go: (next: Screen, to?: EntryTarget) => {
+        setTarget(to ?? null);
+        setScreen(next);
+      },
+    }),
+    [state, target],
+  );
 
   return (
     <AppContext.Provider value={ctx}>
@@ -51,7 +63,10 @@ export function App() {
                 key={t.id}
                 className={`nav-btn ${screen === t.id ? 'nav-on' : ''}`}
                 aria-current={screen === t.id ? 'page' : undefined}
-                onClick={() => setScreen(t.id)}
+                onClick={() => {
+                  setTarget(null);
+                  setScreen(t.id);
+                }}
               >
                 {t.label}
               </button>

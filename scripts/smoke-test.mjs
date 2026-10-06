@@ -164,8 +164,32 @@ await step('3. Dates read 05/09/2027 → 12/09/2027 (never reversed)', async () 
   check(visualOrderOk, 'on screen the start date is left of the end date');
 });
 
+await step('3b. The EL AL cart is part of the starting data', async () => {
+  const flights = page.locator('section[aria-label="השוואת טיסות"]');
+  const text = strip(await flights.textContent());
+  check(text.includes('$915.96'), 'EL AL round trip $915.96 is shown');
+  check(text.includes('Benchmark'), 'marked as benchmark');
+  check(text.includes('ישירה בשני הכיוונים') && text.includes('מגיעה יומיים לפני הקרוז'), 'rated ⭐ with the reasons');
+  check(text.includes('לא מחיר מובטח'), 'shown as a checked price, not a guaranteed one');
+  check(text.includes('$837.76') && text.includes('לא מאומת'), 'group B derived price is marked unverified');
+  const rec = strip(await page.locator('section[aria-label="האפשרות המומלצת"]').textContent());
+  check(rec.includes('עדיין מוקדם לבחור'), 'recommendation says "too early to choose" while data is missing');
+  const a = page.locator('section[aria-label="קבוצה A – זוג + תינוק"]');
+  await a.locator('input[type=radio]').first().check();
+  const totalText = await totalRowText(page, 'A');
+  check(totalText.includes('$5,720.96'), `room $4,805 + cart $915.96 = $5,720.96 (not doubled): ${totalText.slice(0, 40)}`);
+  const route = strip(await a.locator('tr.row-route td').first().textContent());
+  check(route.includes('03/09') && route.includes('05/09–12/09') && route.includes('14/09'), `trip route: ${route}`);
+  await page.getByRole('button', { name: 'איפוס לנתונים ההתחלתיים' }).count();
+});
+
 await step('4. Full scenario entered through the UI', async () => {
   await nav(page, 'הזנת נתונים').click();
+  // Start from an empty trip: delete the two EL AL cart records (also tests deleting).
+  while ((await page.locator('.flight-card').count()) > 0) {
+    await page.locator('.flight-card').first().getByRole('button', { name: 'מחק' }).click();
+  }
+  check((await page.locator('.flight-card').count()) === 0, 'EL AL cart records deleted');
   const formA = page.locator('.group-card.group-A');
   const formB = page.locator('.group-card.group-B');
   const sectionA = page.locator('section[aria-label="הזנה – קבוצה A – זוג + תינוק"]');
@@ -200,7 +224,7 @@ await step('4. Full scenario entered through the UI', async () => {
   ]) {
     await card.getByLabel(label, { exact: true }).fill(value);
   }
-  await formA.getByRole('button', { name: '+ מלון חדש' }).click();
+  await formA.getByRole('button', { name: '+ מלון חדש' }).first().click();
   let hotel = page.locator('.hotel-card').nth(0);
   await hotel.getByLabel('שם המלון').fill('Hotel A');
   await hotel.getByLabel('Check-in').fill('2027-09-03');
@@ -227,12 +251,11 @@ await step('4. Full scenario entered through the UI', async () => {
   ]) {
     await card.getByLabel(label, { exact: true }).fill(value);
   }
-  await page.getByRole('button', { name: '+ הוסף מלון' }).click();
+  await page.getByRole('button', { name: '+ מלון לפני הקרוז' }).click();
   hotel = page.locator('.hotel-card').nth(1);
   await hotel.getByLabel('שייך ל').selectOption('both');
   await hotel.getByLabel('שם המלון').fill('Shared hotel');
-  await hotel.getByLabel('מספר לילות').fill('2');
-  await hotel.getByLabel('מחיר ללילה').fill('300');
+  await hotel.getByLabel('מחיר ללילה').fill('300'); // nights come from the pre-filled dates 03/09 → 05/09
   await selectContaining(formB.getByLabel('מלון – זוג'), 'Shared hotel');
   await formB.getByLabel('טיפים – זוג').fill('150');
   await formB.getByLabel('עמלת סוכן').fill('80');
@@ -242,11 +265,11 @@ await step('4. Full scenario entered through the UI', async () => {
   check(a.includes('$7,392'), `entry screen: group A total ${a} (expected $7,392)`);
   check(b.includes('$7,090'), `entry screen: group B total ${b} (expected $7,090)`);
   const linesA = strip(await formA.locator('.total-lines').textContent());
-  for (const part of ['קרוז: $4,805', 'טיסות: $1,610', 'מושבים: $140', 'מזוודות: $210', 'מלון: $490', 'טיפים לצוות: $37', 'עמלת סוכן: $100']) {
+  for (const part of ['קרוז: $4,805', 'טיסות: $1,610', 'מושבים: $140', 'מזוודות: $210', 'מלון בברצלונה לפני הקרוז: $490', 'טיפים לצוות: $37', 'עמלת סוכן: $100']) {
     check(linesA.includes(part), `group A line "${part}"`);
   }
   const linesB = strip(await formB.locator('.total-lines').textContent());
-  for (const part of ['קרוז: $4,780', 'טיסות: $1,580', 'מושבים: $60', 'מזוודות: $140', 'מלון: $300', 'טיפים לצוות: $150', 'עמלת סוכן: $80']) {
+  for (const part of ['קרוז: $4,780', 'טיסות: $1,580', 'מושבים: $60', 'מזוודות: $140', 'מלון בברצלונה לפני הקרוז: $300', 'טיפים לצוות: $150', 'עמלת סוכן: $80']) {
     check(linesB.includes(part), `group B line "${part}"`);
   }
 });
@@ -285,7 +308,7 @@ await step('7. Details screen, export and import', async () => {
   const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'ייצוא נתונים (JSON)' }).click()]);
   backupPath = await download.path();
   const data = JSON.parse(readFileSync(backupPath, 'utf8'));
-  check(data.version === 2 && data.flights.length === 3 && data.hotels.length === 2, 'export: JSON with all flights and hotels');
+  check(data.version === 3 && data.flights.length === 3 && data.hotels.length === 2, 'export: JSON with all flights and hotels');
 
   await page.getByRole('button', { name: 'איפוס לנתונים ההתחלתיים' }).click();
   await nav(page, 'סיכום והשוואה').click();

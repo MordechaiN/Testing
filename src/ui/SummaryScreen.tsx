@@ -6,19 +6,115 @@ import {
   comparisonSentence,
   computePlan,
   cruiseNights,
-  cheapestItinerary,
+  cruiseVsTrip,
+  flightCost,
+  flightFullyPriced,
   flightsFor,
+  hotelNights,
+  perAdult,
+  rateFlight,
+  recommendation,
+  tripTimeline,
   LINE_KEYS,
   LINE_LABEL,
   todoList,
 } from '../domain/calc';
 import type { DateComparison } from '../domain/calc';
-import { dateName, rangeLabel, rangeLabelLong } from '../domain/dates';
-import { DIRECTION_LABEL, flightDetails, flightLabel, flightPriceText, GROUP_LABEL, GROUP_SHORT, usd, usdText } from '../domain/format';
+import { dateName, longDate, ltr, rangeLabel, rangeLabelLong, shortDate } from '../domain/dates';
+import {
+  DIRECTION_LABEL,
+  directLabel,
+  flightDetails,
+  flightLabel,
+  flightPriceText,
+  GROUP_LABEL,
+  GROUP_SHORT,
+  passengersLabel,
+  usd,
+  usdText,
+} from '../domain/format';
 import type { CSSProperties } from 'react';
-import type { AppState, Cruise, GroupId } from '../domain/types';
+import type { Cruise, Flight, GroupId } from '../domain/types';
 import { Chip, LineValue, NoticeList, StatusBadge, Usd } from './common';
 import { useApp } from './context';
+
+// ---------- the recommendation ----------
+
+const RATING_TONE = { recommended: 'green', compromise: 'yellow', bad: 'red', unknown: 'gray' } as const;
+
+function RecommendationFor({ group }: { group: GroupId }) {
+  const { state, go } = useApp();
+  const rec = recommendation(state, group);
+  const cruise = state.cruises.find((c) => c.id === rec.cruiseId);
+  const plan = cruise ? computePlan(state, cruise.id, group) : null;
+  return (
+    <div className={`rec rec-${rec.status} answer-${group}`}>
+      <h3>{GROUP_LABEL[group]}</h3>
+      {rec.status === 'recommend' && cruise && plan && (
+        <>
+          <div className="rec-title">
+            🏆 <strong>{rangeLabelLong(cruise.start, cruise.end)}</strong> · <Usd value={plan.total} className="big" />
+          </div>
+          <div className="muted small">{plan.room?.name}</div>
+          <p className="rec-why">למה?</p>
+          <ul className="plain-list">
+            {rec.reasons.map((r, i) => (
+              <li key={i}>{r}</li>
+            ))}
+          </ul>
+          <p className="muted small">זו המלצה בלבד, לפי מה שהוזן עד עכשיו. ההחלטה שלכם.</p>
+        </>
+      )}
+      {rec.status === 'early' && (
+        <>
+          <div className="rec-title">
+            <Chip tone="yellow">🟡 עדיין מוקדם לבחור</Chip>
+          </div>
+          {rec.missing.length > 0 && (
+            <p>
+              חסרים: <strong>{rec.missing.join(', ')}</strong>
+            </p>
+          )}
+          <button className="btn btn-small" onClick={() => go('entry')}>
+            להשלמת הנתונים
+          </button>
+        </>
+      )}
+      {rec.status === 'none' && (
+        <>
+          <div className="rec-title">
+            <Chip tone="gray">אין המלצה</Chip>
+          </div>
+          <ul className="plain-list">
+            {rec.reasons.map((r, i) => (
+              <li key={i}>{r}</li>
+            ))}
+          </ul>
+        </>
+      )}
+      {rec.cautions.map((c, i) => (
+        <p key={i} className="notice notice-yellow">
+          🟡 {c}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function Recommendation() {
+  const { state } = useApp();
+  return (
+    <section className="section rec-box" aria-label="האפשרות המומלצת">
+      <h2>🏆 האפשרות המומלצת</h2>
+      <p className="muted small">כל קבוצה בנפרד. ההמלצה לוקחת בחשבון מחיר כולל, טיסה ישירה, מרווח ביטחון לפני ואחרי הקרוז, שעות ותינוק – לא רק מחיר.</p>
+      <div className="answer-grid">
+        {activeGroups(state).map((g) => (
+          <RecommendationFor key={g} group={g} />
+        ))}
+      </div>
+    </section>
+  );
+}
 
 // ---------- what now? ----------
 
@@ -119,23 +215,9 @@ function GroupAnswer({ group }: { group: GroupId }) {
   );
 }
 
-function cheapestFlightText(state: AppState, cruiseId: string, group: GroupId): string | null {
-  const it = cheapestItinerary(state, cruiseId, group);
-  if (!it) return null;
-  const names = it.legs.map((f) => `${f.direction === 'round' ? 'הלוך-חזור ' : ''}${flightLabel(f)}`).join(' + ');
-  const extras = it.seats + it.baggage > 0 ? ` + מושבים ${usd(it.seats)} + מזוודות ${usd(it.baggage)}` : '';
-  const only = it.oneWayOnly ? ` (רק ${it.legs[0]!.direction === 'back' ? 'חזור' : 'הלוך'} – הכיוון השני חסר)` : '';
-  return `${names}: ${usd(it.total)} (טיסות ${usd(it.fare)}${extras})${only}`;
-}
-
 function QuickAnswer() {
   const { state } = useApp();
   const groups = activeGroups(state);
-  const flightLines = state.cruises.flatMap((c) =>
-    groups
-      .map((g) => ({ c, g, text: cheapestFlightText(state, c.id, g) }))
-      .filter((x): x is { c: Cruise; g: GroupId; text: string } => x.text !== null),
-  );
   const favorites = groups
     .map((g) => ({ g, cruise: state.cruises.find((c) => c.id === state.favorite[g]) }))
     .filter((x): x is { g: GroupId; cruise: Cruise } => x.cruise !== undefined);
@@ -153,20 +235,6 @@ function QuickAnswer() {
       </div>
 
       <div className="answer-lines">
-        <div>
-          <strong>✈️ הטיסות הזולות ביותר: </strong>
-          {flightLines.length === 0 ? (
-            <span className="not-entered">עדיין לא הוזנו טיסות</span>
-          ) : (
-            <ul className="plain-list">
-              {flightLines.map(({ c, g, text }) => (
-                <li key={c.id + g}>
-                  {dateName(c.start)} · {GROUP_SHORT[g]} – {text}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
         <div>
           <strong>⭐ מועדף (סימנתי): </strong>
           {favorites.length === 0 ? (
@@ -265,10 +333,12 @@ function FlightPicker({ cruise, group, slot }: { cruise: Cruise; group: GroupId;
 }
 
 function GroupTable({ group }: { group: GroupId }) {
-  const { state, dispatch } = useApp();
+  const { state, dispatch, go } = useApp();
   const cmp = compareDates(state, group);
   const results = state.cruises.map((c) => computePlan(state, c.id, group));
   const sentence = comparisonSentence(cmp, usdText);
+  const trip = cruiseVsTrip(cmp);
+  const pax = state.passengers[group];
 
   if (state.cruises.length === 0) return null;
 
@@ -314,6 +384,14 @@ function GroupTable({ group }: { group: GroupId }) {
                 </td>
               ))}
             </tr>
+            <tr className="row-route">
+              <th scope="row">מסלול</th>
+              {state.cruises.map((c) => (
+                <td key={c.id}>
+                  <Timeline cruiseId={c.id} group={group} />
+                </td>
+              ))}
+            </tr>
             <tr className="row-pick">
               <th scope="row">טיסה</th>
               {state.cruises.map((c, i) => (
@@ -328,24 +406,49 @@ function GroupTable({ group }: { group: GroupId }) {
                       <FlightPicker cruise={c} group={group} slot="back" />
                     </div>
                   )}
-                  {[results[i]!.out, results[i]!.back].filter(Boolean).map((f) => (
-                    <div key={f!.id} className="muted small flight-chosen">
-                      {DIRECTION_LABEL[f!.direction]}: {flightLabel(f!)}
-                      {flightDetails(f!) && <> · {flightDetails(f!)}</>}
-                    </div>
-                  ))}
+                  {[results[i]!.out, results[i]!.back].filter((f): f is Flight => f !== null).map((f) => {
+                    const rating = rateFlight(state, f);
+                    return (
+                      <div key={f.id} className="flight-chosen">
+                        <div className="small">
+                          ✈️ {DIRECTION_LABEL[f.direction]}: {flightLabel(f)}
+                          {flightDetails(f) && <span className="muted"> · {flightDetails(f)}</span>}
+                        </div>
+                        <Chip tone={RATING_TONE[rating.level]}>
+                          {rating.icon} {rating.label}
+                        </Chip>
+                        <span className="muted small"> {rating.reasons.join(' · ')}</span>
+                      </div>
+                    );
+                  })}
+                  <button className="btn-link" onClick={() => go('entry', { cruiseId: c.id, focusId: results[i]!.out?.id })}>
+                    ✏️ עריכה
+                  </button>
                 </td>
               ))}
             </tr>
 
-            {LINE_KEYS.map((key) => (
+            {LINE_KEYS.filter((key) => key !== 'hotelAfter' || results.some((r) => r.hotelAfter || r.lines.hotelAfter.label)).map((key) => (
               <tr key={key} className={key === 'cruise' ? 'row-cruise' : 'row-line'}>
                 <th scope="row">{key === 'cruise' ? 'קרוז (החדר שנבחר)' : LINE_LABEL[key]}</th>
-                {results.map((r) => (
-                  <td key={r.cruiseId}>
-                    {key === 'cruise' && !r.room ? <Chip tone="red">🔴 חסר חדר</Chip> : <LineValue line={r.lines[key]} />}
-                  </td>
-                ))}
+                {results.map((r) => {
+                  const hotel = key === 'hotel' ? r.hotel : key === 'hotelAfter' ? r.hotelAfter : null;
+                  return (
+                    <td key={r.cruiseId}>
+                      {key === 'cruise' && !r.room ? <Chip tone="red">🔴 חסר חדר</Chip> : <LineValue line={r.lines[key]} />}
+                      {hotel && (
+                        <div className="muted small">
+                          🏨 {hotel.name || 'מלון'} · {hotelNights(hotel).nights} לילות
+                          {(key === 'hotel' || key === 'hotelAfter') && (
+                            <button className="btn-link" onClick={() => go('entry', { cruiseId: r.cruiseId, focusId: hotel.id })}>
+                              ✏️ עריכה
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
 
@@ -360,6 +463,14 @@ function GroupTable({ group }: { group: GroupId }) {
                       <>
                         <Usd value={r.total} className="total" />
                         {isMin && <div className="min-tag">הזול מבין התאריכים</div>}
+                        <div className="muted small">
+                          קרוז בלבד <Usd value={r.cruiseOnly} /> · כל הטיול <Usd value={r.total} />
+                        </div>
+                        {perAdult(r.total, pax) !== null && (
+                          <div className="muted small">
+                            ≈ <Usd value={perAdult(r.total, pax)!} /> למבוגר (מידע משני – התינוק כלול בעלות)
+                          </div>
+                        )}
                       </>
                     ) : (
                       <>
@@ -390,6 +501,186 @@ function GroupTable({ group }: { group: GroupId }) {
         <strong>השוואת תאריכים: </strong>
         {sentence ? <Verdict cmp={cmp} /> : <span className="muted">צריך לפחות שני תאריכים עם מחיר.</span>}
       </div>
+      {trip.cruiseGap !== null && trip.cruiseGap > 0 && (
+        <p className={`cvt ${trip.differs ? 'cvt-warn' : ''}`}>
+          <strong>קרוז בלבד:</strong> {dateName(state.cruises[trip.cruiseCheapest ?? 0]!.start)} זול ב-{usdText(trip.cruiseGap)}
+          {trip.tripGap !== null && trip.tripCheapest !== null && (
+            <>
+              {' '}
+              · <strong>כל הטיול:</strong> {dateName(state.cruises[trip.tripCheapest]!.start)} זול ב-{usdText(trip.tripGap)}
+              {cmp.partial && ' (לפי מה שהוזן – השוואה חלקית)'}
+            </>
+          )}
+          {trip.differs && <> · 🟡 הקרוז הזול יותר הוא לא החופשה הזולה יותר.</>}
+        </p>
+      )}
+    </section>
+  );
+}
+
+// ---------- trip timeline ----------
+
+const TIMELINE_ICON = { flight: '✈️', hotel: '🏨', cruise: '🚢' } as const;
+
+function Timeline({ cruiseId, group }: { cruiseId: string; group: GroupId }) {
+  const { state } = useApp();
+  const events = tripTimeline(state, cruiseId, group);
+  const span = (from: string, to: string) =>
+    to ? `${shortDate(from) || '??'}–${shortDate(to)}` : shortDate(from) || 'תאריך לא הוזן';
+  return (
+    <ol className="timeline">
+      {events.map((e, i) => (
+        <li key={i}>
+          <span className="tl-date">{ltr(span(e.from, e.to))}</span> {TIMELINE_ICON[e.kind]} {e.text}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+// ---------- flight comparison ----------
+
+function FlightRow({ flight, selected, onSelect }: { flight: Flight; selected: boolean; onSelect: () => void }) {
+  const { state, go } = useApp();
+  const pax = state.passengers[flight.group];
+  const cost = flightCost(flight, pax);
+  const rating = rateFlight(state, flight);
+  const dates =
+    flight.direction === 'round'
+      ? `${shortDate(flight.date) || '??'} → ${shortDate(flight.returnDate) || '??'}`
+      : shortDate(flight.date) || 'תאריך לא הוזן';
+  return (
+    <tr className={selected ? 'is-selected' : ''}>
+      <th scope="row">
+        <div>
+          ✈️ {flightLabel(flight)} {flight.benchmark && <Chip tone="blue">📌 Benchmark</Chip>}
+        </div>
+        <div className="muted small">{DIRECTION_LABEL[flight.direction]}</div>
+      </th>
+      <td data-label="תאריכים">{ltr(dates)}</td>
+      <td data-label="ישירה">{directLabel(flight)}</td>
+      <td data-label="נוסעים">{passengersLabel(pax)}</td>
+      <td data-label="מחיר">
+        {cost.fareEntered ? <Usd value={cost.total} className="total" /> : <span className="not-entered">חסר מחיר</span>}
+        {cost.usesCartTotal && <div className="muted small">סה״כ העגלה (Round Trip)</div>}
+        {(cost.seats > 0 || cost.baggage > 0) && (
+          <div className="muted small">
+            טיסה {usd(cost.fare)} + מושבים {usd(cost.seats)} + מזוודות {usd(cost.baggage)}
+          </div>
+        )}
+        {flight.fareType && <div className="muted small">{flight.fareType}</div>}
+        {!flight.verified && <Chip tone="yellow">🟡 לא מאומת</Chip>}
+        {flight.verified && flight.checkedAt && (
+          <div className="muted small">
+            מחיר שנבדק ב-{ltr(longDate(flight.checkedAt))} – לא מחיר מובטח
+          </div>
+        )}
+      </td>
+      <td data-label="דירוג ולמה">
+        <Chip tone={RATING_TONE[rating.level]}>
+          {rating.icon} {rating.label}
+        </Chip>
+        {rating.goodPrice && <Chip tone="green">🟢 מחיר טוב</Chip>}
+        <div className="small">{rating.reasons.join(' · ')}</div>
+      </td>
+      <td className="small" data-label="מקור">
+        {flight.source || <span className="not-entered">מקור לא הוזן</span>}
+        {flight.sourceUrl && (
+          <div>
+            <a href={flight.sourceUrl} target="_blank" rel="noreferrer noopener">
+              קישור
+            </a>
+          </div>
+        )}
+      </td>
+      <td>
+        <button className={`btn btn-small ${selected ? 'btn-primary' : ''}`} onClick={onSelect} aria-pressed={selected}>
+          {selected ? '✓ נבחרה' : 'בחר'}
+        </button>
+        <button className="btn-link" onClick={() => go('entry', { cruiseId: flight.cruiseId, focusId: flight.id })}>
+          ✏️ עריכה
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+function FlightComparison() {
+  const { state, dispatch, go } = useApp();
+  const groups = activeGroups(state);
+  return (
+    <section className="section" aria-label="השוואת טיסות">
+      <h2>✈️ השוואת טיסות</h2>
+      <p className="muted small">
+        הדירוג הוא המלצה בלבד, עם הסיבה. טיסה ישירה עדיפה בגלל התינוק. מחירי טיסות משתנים – כל מחיר מוצג כמחיר שנבדק, לא כמחיר מובטח.
+      </p>
+      {state.flights.length === 0 && (
+        <div className="banner banner-yellow">
+          <div>עדיין לא הוזנו טיסות.</div>
+          <button className="btn" onClick={() => go('entry')}>
+            הוספת טיסה
+          </button>
+        </div>
+      )}
+      {state.cruises.map((c) =>
+        groups.map((g) => {
+          const list = state.flights.filter((f) => f.cruiseId === c.id && f.group === g);
+          if (list.length === 0) return null;
+          const plan = state.plans[c.id]?.[g];
+          const pax = state.passengers[g];
+          const order = { recommended: 0, compromise: 1, unknown: 2, bad: 3 } as const;
+          const sorted = [...list].sort(
+            (a, b) =>
+              order[rateFlight(state, a).level] - order[rateFlight(state, b).level] ||
+              (flightFullyPriced(a, pax) ? flightCost(a, pax).total : Infinity) - (flightFullyPriced(b, pax) ? flightCost(b, pax).total : Infinity),
+          );
+          return (
+            <div key={c.id + g} className="flight-cruise">
+              <h3>
+                {rangeLabelLong(c.start, c.end)} · {GROUP_LABEL[g]}
+              </h3>
+              <div className="table-scroll">
+                <table className="cmp flights">
+                  <thead>
+                    <tr>
+                      <th scope="col">טיסה</th>
+                      <th scope="col">תאריכים</th>
+                      <th scope="col">ישירה</th>
+                      <th scope="col">נוסעים</th>
+                      <th scope="col">מחיר</th>
+                      <th scope="col">דירוג ולמה</th>
+                      <th scope="col">מקור</th>
+                      <th scope="col">
+                        <span className="sr-only">פעולות</span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sorted.map((f) => {
+                      const selected = plan?.outFlightId === f.id || plan?.backFlightId === f.id;
+                      return (
+                        <FlightRow
+                          key={f.id}
+                          flight={f}
+                          selected={selected}
+                          onSelect={() =>
+                            dispatch({
+                              type: 'updatePlan',
+                              cruiseId: c.id,
+                              group: g,
+                              patch: f.direction === 'back' ? { backFlightId: selected ? null : f.id } : { outFlightId: selected ? null : f.id },
+                            })
+                          }
+                        />
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        }),
+      )}
     </section>
   );
 }
@@ -401,11 +692,13 @@ export function SummaryScreen() {
   const groups = activeGroups(state);
   return (
     <div className="screen">
+      <Recommendation />
       <WhatNow />
       <QuickAnswer />
       {groups.map((g) => (
         <GroupTable key={g} group={g} />
       ))}
+      <FlightComparison />
       {!state.groupBEnabled && (
         <p className="banner banner-blue">
           🔵 קבוצה B מוסתרת (לא מצטרפת). הנתונים שלה שמורים, והם לא משפיעים על שום סכום כאן.

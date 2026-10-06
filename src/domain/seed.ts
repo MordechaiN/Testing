@@ -1,3 +1,4 @@
+import { addDays } from './dates';
 import type {
   AppState,
   Cruise,
@@ -6,6 +7,7 @@ import type {
   FlightDirection,
   GroupId,
   Hotel,
+  HotelPhase,
   ItemCategory,
   Owner,
   Plan,
@@ -26,6 +28,8 @@ export function emptyPlan(): Plan {
     backFlightId: null,
     hotelId: null,
     noHotel: false,
+    hotelAfterId: null,
+    noHotelAfter: false,
     tips: null,
     tipsMode: 'group',
     tipsPeople: null,
@@ -57,18 +61,32 @@ export function emptyFlight(cruiseId: string, group: GroupId, direction: FlightD
     returnStops: null,
     returnDuration: '',
     baggageInfo: '',
+    fareType: '',
     fare: {},
     seat: {},
     baggage: {},
+    cartTotal: null,
+    fareOut: null,
+    fareBack: null,
+    changeTerms: '',
+    cancelTerms: '',
+    source: '',
+    sourceUrl: '',
+    checkedAt: '',
+    verified: true,
+    benchmark: false,
     notes: '',
   };
 }
 
-export function emptyHotel(cruiseId: string, owner: Owner): Hotel {
+export function emptyHotel(cruiseId: string, owner: Owner, phase: HotelPhase = 'before'): Hotel {
   return {
     id: uid('h'),
     cruiseId,
     owner,
+    phase,
+    address: '',
+    currency: 'USD',
     split: 'half',
     shareA: null,
     name: '',
@@ -79,7 +97,12 @@ export function emptyHotel(cruiseId: string, owner: Owner): Hotel {
     taxes: null,
     cityTax: null,
     breakfast: null,
+    resortFee: null,
     other: null,
+    usdTotal: null,
+    url: '',
+    source: '',
+    checkedAt: '',
     notes: '',
   };
 }
@@ -191,12 +214,13 @@ export function initialTerms(): Term[] {
   ];
 }
 
+/** Base state: the 12 agent prices and the agent's terms. Nothing else. */
 export function initialState(): AppState {
   const cruises = initialCruises();
   const plans: AppState['plans'] = {};
   for (const c of cruises) plans[c.id] = plansFor();
   return {
-    version: 2,
+    version: 3,
     groupBEnabled: true,
     passengers: {
       A: { adults: 2, infants: 1 },
@@ -211,5 +235,103 @@ export function initialState(): AppState {
     deposit: { A: null, B: null },
     terms: initialTerms(),
     notes: '',
+    seeds: { elAlBenchmark: false },
   };
+}
+
+// ---------- the EL AL cart found by the user (benchmark) ----------
+
+const BENCHMARK_CHECKED = '2026-10-06';
+
+const BENCHMARK_BREAKDOWN =
+  'פירוט מהעגלה: מבוגר – Fare $229 + Carrier surcharge $120 + Taxes/fees $69.88 = $418.88; תינוק – Fare $46 + Taxes/fees $32.20 = $78.20. ' +
+  'הלוך Lite (N) $514.26 + חזור Lite (U) $401.70 = $915.96 (Round Trip אחד – לא לסכם פעמיים).';
+
+/** Round trip, 2 adults + infant, exactly as the EL AL cart showed it. Group A = couple + infant. */
+export function elAlBenchmarkA(): Flight {
+  return {
+    ...emptyFlight('c1', 'A', 'round'),
+    id: 'bench-elal-A',
+    airline: 'EL AL',
+    flightNo: '',
+    date: '2027-09-03',
+    depTime: '14:25',
+    arrTime: '18:05',
+    fromAirport: 'TLV',
+    toAirport: 'BCN',
+    stops: 0,
+    duration: '4:40',
+    returnFlightNo: '',
+    returnDate: '2027-09-14',
+    returnDepTime: '',
+    returnArrTime: '',
+    returnStops: 0,
+    returnDuration: '',
+    baggageInfo: '',
+    fareType: 'Lite (N) הלוך / Lite (U) חזור',
+    fare: { 'adult-1': 418.88, 'adult-2': 418.88, 'infant-1': 78.2 },
+    cartTotal: 915.96,
+    fareOut: 514.26,
+    fareBack: 401.7,
+    source: 'עגלת EL AL (הוזן על ידי המשתמש)',
+    checkedAt: BENCHMARK_CHECKED,
+    verified: true,
+    benchmark: true,
+    notes: `${BENCHMARK_BREAKDOWN} לא הוזנו: מספרי טיסה, שעות חזור, כבודה, מושבים, תנאי שינוי וביטול.`,
+  };
+}
+
+/**
+ * Same flight for group B (2 adults). The cart was for 2 adults + infant, so this price is DERIVED from the
+ * per-adult breakdown ($418.88 × 2) and is not a cart total – marked as not verified.
+ */
+export function elAlBenchmarkB(): Flight {
+  return {
+    ...elAlBenchmarkA(),
+    id: 'bench-elal-B',
+    group: 'B',
+    fare: { 'adult-1': 418.88, 'adult-2': 418.88 },
+    cartTotal: null,
+    fareOut: null,
+    fareBack: null,
+    source: 'נגזר מפירוט הנוסעים בעגלת EL AL – לא עגלה נפרדת לשני מבוגרים',
+    verified: false,
+    notes: `מחיר נגזר ($418.88 × 2 = $837.76), לא אומת בעגלה לשני מבוגרים בלבד. ${BENCHMARK_BREAKDOWN}`,
+  };
+}
+
+/** Adds the user's EL AL cart once. If the user deletes it later it is not added again. */
+export function applySeeds(state: AppState): AppState {
+  if (state.seeds.elAlBenchmark) return state;
+  const cruise = state.cruises.find((c) => c.id === 'c1');
+  const seeded: AppState = { ...state, seeds: { ...state.seeds, elAlBenchmark: true } };
+  if (!cruise || cruise.start !== '2027-09-05' || state.flights.some((f) => f.id.startsWith('bench-elal'))) return seeded;
+  const planA = state.plans.c1?.A;
+  return {
+    ...seeded,
+    flights: [...state.flights, elAlBenchmarkA(), elAlBenchmarkB()],
+    plans: planA && !planA.outFlightId ? { ...state.plans, c1: { ...state.plans.c1!, A: { ...planA, outFlightId: 'bench-elal-A' } } } : state.plans,
+  };
+}
+
+/** What a new user (or a reset) starts with: base data + the EL AL cart. */
+export function freshState(): AppState {
+  return applySeeds(initialState());
+}
+
+/**
+ * A new hotel for a cruise date, with the planned dates pre-filled (2 nights before / after the cruise).
+ * These are plan dates the user can change – no price is ever pre-filled.
+ */
+export function newHotelFor(cruise: Cruise | undefined, owner: Owner, phase: HotelPhase): Hotel {
+  const h = emptyHotel(cruise?.id ?? '', owner, phase);
+  if (!cruise) return h;
+  if (phase === 'before') {
+    const from = addDays(cruise.start, -2);
+    if (from) return { ...h, checkIn: from, checkOut: cruise.start };
+  } else {
+    const to = addDays(cruise.end, 2);
+    if (to) return { ...h, checkIn: cruise.end, checkOut: to };
+  }
+  return h;
 }

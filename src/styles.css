@@ -493,6 +493,8 @@ main {
 
 /* ---------- comparison table ---------- */
 .table-scroll {
+  /* contains absolutely positioned .sr-only labels, so they cannot widen the whole page */
+  position: relative;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
   max-width: 100%;
@@ -1008,4 +1010,109 @@ textarea.notes {
 
 .verdict-sure {
   color: var(--green);
+}
+
+/* ---------- recommendation, timeline, flights ---------- */
+.rec {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  border-inline-start: 5px solid var(--a);
+  background: #fff;
+}
+.rec.answer-B {
+  border-inline-start-color: var(--b);
+}
+.rec-recommend {
+  background: #f3fbf5;
+}
+.rec-title {
+  font-size: 1.05rem;
+  margin: 6px 0;
+}
+.rec-why {
+  margin: 8px 0 2px;
+  font-weight: 600;
+}
+.rec p.notice {
+  margin: 6px 0 0;
+}
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.88rem;
+}
+.tl-date {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.cvt {
+  margin: 10px 0 0;
+  font-size: 0.92rem;
+}
+.cvt-warn {
+  background: var(--yellow-bg);
+  color: var(--yellow);
+  padding: 8px 12px;
+  border-radius: 10px;
+}
+.rating-line {
+  margin-top: 4px;
+}
+.flight-chosen {
+  margin-top: 6px;
+}
+.flight-cruise h3 {
+  margin: 14px 0 6px;
+}
+.cmp.flights tr.is-selected th,
+.cmp.flights tr.is-selected td {
+  background: #eff4ff;
+}
+.cmp.flights td,
+.cmp.flights th {
+  min-width: 90px;
+}
+.cmp.flights tbody th {
+  min-width: 140px;
+  color: var(--ink);
+  font-weight: 600;
+  white-space: normal;
+}
+
+/* Flight comparison on phones: one card per flight instead of a wide table */
+@media (max-width: 760px) {
+  .cmp.flights thead {
+    display: none;
+  }
+  .cmp.flights,
+  .cmp.flights tbody,
+  .cmp.flights tr,
+  .cmp.flights th,
+  .cmp.flights td {
+    display: block;
+    width: 100%;
+  }
+  .cmp.flights tr {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    margin-bottom: 10px;
+    padding: 8px 10px;
+  }
+  .cmp.flights th,
+  .cmp.flights td {
+    border: 0;
+    padding: 4px 0;
+    min-width: 0 !important;
+  }
+  .cmp.flights td::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 0.78rem;
+    color: var(--muted);
+  }
 }

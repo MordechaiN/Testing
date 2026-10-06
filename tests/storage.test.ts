@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { computePlan } from '../src/domain/calc';
 import { addDays, daysBetween, longDate, parseDate, rangeLabel, rangeLabelLong, shortDate } from '../src/domain/dates';
 import { exportJson, importJson, loadState, normalizeState, saveState, STORAGE_KEY } from '../src/domain/storage';
-import { initialState } from '../src/domain/seed';
+import { freshState, initialState } from '../src/domain/seed';
 import { fresh, fullScenario, plan, run } from './helpers';
 
 const strip = (s: string) => s.replace(/[⁦⁩]/g, '');
@@ -18,14 +18,14 @@ describe('localStorage', () => {
 
   it('falls back to the initial data when storage is corrupt, and keeps the corrupt text aside', () => {
     localStorage.setItem(STORAGE_KEY, '{not json');
-    expect(loadState()).toEqual(initialState());
+    expect(loadState()).toEqual(freshState());
     const kept = Object.keys(localStorage).filter((k) => k.startsWith(`${STORAGE_KEY}-unreadable-`));
     expect(kept).toHaveLength(1);
     expect(localStorage.getItem(kept[0]!)).toBe('{not json');
   });
 
-  it('starts with the initial data when nothing was saved', () => {
-    expect(loadState()).toEqual(initialState());
+  it('starts with the initial data (including the EL AL cart) when nothing was saved', () => {
+    expect(loadState()).toEqual(freshState());
   });
 });
 
@@ -113,7 +113,7 @@ describe('migration from version 1 (data is never lost)', () => {
   // B: 4780 + out (2×300 + 2×25 + 2×60 + 2×5 = 780) + hotel 400 (full) + drinks 30 = 5,990
   it('keeps every total exactly as it was', () => {
     const s = normalizeState(v1)!;
-    expect(s.version).toBe(2);
+    expect(s.version).toBe(3);
     expect(computePlan(s, 'c1', 'A').total).toBe(6995);
     expect(computePlan(s, 'c1', 'B').total).toBe(5990);
   });
@@ -137,10 +137,10 @@ describe('migration from version 1 (data is never lost)', () => {
     expect(s.hotels.map((h) => h.owner).sort()).toEqual(['A', 'B']);
   });
 
-  it('a v1 save in localStorage is migrated on load and saved back as v2', () => {
+  it('a v1 save in localStorage is migrated on load to the current version', () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(v1));
     const loaded = loadState();
-    expect(loaded.version).toBe(2);
+    expect(loaded.version).toBe(3);
     expect(computePlan(loaded, 'c1', 'A').total).toBe(6995);
   });
 });
@@ -173,7 +173,8 @@ describe('dates', () => {
     expect(longDate(addDays('2027-09-19', -90)!)).toBe('21/06/2027');
   });
 
-  it('keeps the fresh() helper equal to the initial state', () => {
-    expect(fresh()).toEqual(initialState());
+  it('the test helper fresh() is the base state without the built-in EL AL cart', () => {
+    expect(fresh().flights).toEqual([]);
+    expect(freshState().flights.map((f) => f.id)).toEqual(['bench-elal-A', 'bench-elal-B']);
   });
 });
