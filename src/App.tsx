@@ -16,8 +16,10 @@ const TABS: { id: Screen; label: string }[] = [
 export function App() {
   const [state, dispatch] = useReducer(reducer, undefined, loadState);
   const [screen, setScreen] = useState<Screen>('summary');
+  const [saved, setSaved] = useState(true);
 
-  useEffect(() => saveState(state), [state]);
+  // Autosave on every change.
+  useEffect(() => setSaved(saveState(state)), [state]);
   useEffect(() => window.scrollTo?.({ top: 0 }), [screen]);
 
   const ctx = useMemo(() => ({ state, dispatch, go: setScreen }), [state]);
@@ -39,32 +41,39 @@ export function App() {
               </button>
             ))}
           </nav>
-          <div className="scenario" role="group" aria-label="מי נוסע">
-            <span className="scenario-label">מי נוסע?</span>
-            <button
-              className={`seg ${!state.groupBEnabled ? 'seg-on' : ''}`}
-              aria-pressed={!state.groupBEnabled}
-              onClick={() => dispatch({ type: 'setGroupBEnabled', enabled: false })}
-            >
-              רק קבוצה A (זוג + תינוק)
-            </button>
+          <div className="scenario" role="group" aria-label="הקבוצה השנייה מצטרפת?">
+            <span className="scenario-label">הקבוצה השנייה (זוג) מצטרפת?</span>
             <button
               className={`seg ${state.groupBEnabled ? 'seg-on' : ''}`}
               aria-pressed={state.groupBEnabled}
               onClick={() => dispatch({ type: 'setGroupBEnabled', enabled: true })}
             >
-              A + קבוצה B (זוג)
+              כן
+            </button>
+            <button
+              className={`seg ${!state.groupBEnabled ? 'seg-on' : ''}`}
+              aria-pressed={!state.groupBEnabled}
+              onClick={() => dispatch({ type: 'setGroupBEnabled', enabled: false })}
+            >
+              לא – רק קבוצה A
             </button>
           </div>
         </div>
       </header>
+      {!saved && (
+        <div className="wrap">
+          <p className="banner banner-red" role="alert">
+            🔴 הדפדפן לא מאפשר שמירה (אולי חלון פרטי). השינויים לא יישמרו – ייצאו גיבוי במסך "פרטים ותנאים".
+          </p>
+        </div>
+      )}
       <main className="wrap">
         {screen === 'summary' && <SummaryScreen />}
         {screen === 'entry' && <EntryScreen />}
         {screen === 'details' && <DetailsScreen />}
       </main>
       <footer className="wrap foot muted small">
-        כלי אישי להשוואה – לא מבצע הזמנות. כל הסכומים בדולרים. הנתונים נשמרים בדפדפן הזה.
+        כלי אישי להשוואה – לא מזמין כלום. כל הסכומים בדולרים ($). נשמר אוטומטית בדפדפן הזה.
       </footer>
     </AppContext.Provider>
   );

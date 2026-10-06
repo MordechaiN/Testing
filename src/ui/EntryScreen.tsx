@@ -4,51 +4,33 @@ import {
   computePlan,
   cruiseDatesValid,
   flightCost,
+  flightsFor,
   hotelCost,
   hotelIssues,
   hotelNights,
   hotelServesGroup,
-  infantPriceMissing,
+  hotelShare,
+  LINE_KEYS,
+  LINE_LABEL,
+  passengerSlots,
+  tipsPeople,
 } from '../domain/calc';
-import type { Breakdown } from '../domain/calc';
-import { rangeLabel, shortDate } from '../domain/dates';
-import { flightLabel, GROUP_LABEL, GROUP_SHORT, stopsLabel, usd } from '../domain/format';
-import { emptyFlight, emptyHotel, uid } from '../domain/seed';
+import { rangeLabel } from '../domain/dates';
+import { DIRECTION_LABEL, flightDetails, flightLabel, GROUP_LABEL, GROUP_SHORT, OWNER_LABEL, usd } from '../domain/format';
+import type { PriceRow } from '../domain/reducer';
+import { emptyFlight, emptyHotel, emptyItem, uid } from '../domain/seed';
+import type { Cruise, ExtraItem, Flight, FlightDirection, GroupId, Hotel, ItemCategory, Owner, Plan } from '../domain/types';
 import { GROUPS } from '../domain/types';
-import type {
-  Cruise,
-  Flight,
-  FlightDirection,
-  GroupId,
-  Hotel,
-  HotelGroup,
-  PerPassenger,
-} from '../domain/types';
-import { Chip, NumField, Section, TextField, Usd } from './common';
+import { Chip, LineValue, MoneyInput, NotEntered, NoticeList, NumField, Section, TextField, Usd } from './common';
 import { useApp } from './context';
 
-// ---------- shared helpers ----------
+// ---------- open/close state of the option cards ----------
 
 interface Cards {
   open: Set<string>;
   toggle: (id: string) => void;
   show: (id: string) => void;
 }
-
-const TOTAL_LABELS: [keyof Breakdown, string][] = [
-  ['cruise', 'קרוז'],
-  ['flights', 'טיסות'],
-  ['seats', 'מושבים'],
-  ['baggage', 'מזוודות'],
-  ['flightExtras', 'תוספות טיסה'],
-  ['hotel', 'מלון'],
-  ['tips', 'טיפים'],
-  ['agentFee', 'עמלה'],
-  ['drinks', 'שתייה'],
-  ['internet', 'אינטרנט'],
-  ['transport', 'תחבורה'],
-  ['other', 'אחר'],
-];
 
 // ---------- one group on one date: the main form ----------
 
@@ -57,53 +39,42 @@ function GroupForm({ cruise, group, cards }: { cruise: Cruise; group: GroupId; c
   const plan = state.plans[cruise.id]?.[group];
   if (!plan) return null;
   const result = computePlan(state, cruise.id, group);
-  const room = result.room;
   const pax = state.passengers[group];
+  const patch = (p: Partial<Plan>) => dispatch({ type: 'updatePlan', cruiseId: cruise.id, group, patch: p });
+  const hotels = state.hotels.filter((h) => h.cruiseId === cruise.id && hotelServesGroup(h, group));
 
-  const patch = (p: Partial<typeof plan>) => dispatch({ type: 'updatePlan', cruiseId: cruise.id, group, patch: p });
-
-  const flightsFor = (direction: FlightDirection) =>
-    state.flights.filter((f) => f.cruiseId === cruise.id && f.direction === direction);
-  const hotelsHere = state.hotels.filter((h) => h.cruiseId === cruise.id && hotelServesGroup(h, group));
-
-  const newFlight = (direction: FlightDirection) => {
-    const f = emptyFlight(cruise.id, direction);
-    dispatch({ type: 'addFlight', flight: f });
-    patch(direction === 'out' ? { outFlightId: f.id } : { backFlightId: f.id });
-    cards.show(f.id);
-  };
   const newHotel = () => {
     const h = emptyHotel(cruise.id, group);
     dispatch({ type: 'addHotel', hotel: h });
-    patch({ hotelId: h.id });
+    patch({ hotelId: h.id, noHotel: false });
     cards.show(h.id);
   };
 
-  const flightSelect = (direction: FlightDirection, value: string | null, key: 'outFlightId' | 'backFlightId') => (
-    <div className="field field-wide">
-      <span className="field-label">{direction === 'out' ? 'טיסת הלוך' : 'טיסת חזור'}</span>
-      <div className="select-row">
+  const flightSelect = (slot: 'out' | 'back') => {
+    const options = flightsFor(state, cruise.id, group, slot);
+    const label = slot === 'out' ? 'טיסת הלוך (או כרטיס הלוך-חזור)' : 'טיסת חזור';
+    return (
+      <label className="field field-wide">
+        <span className="field-label">{label}</span>
         <select
-          aria-label={`${direction === 'out' ? 'טיסת הלוך' : 'טיסת חזור'} – ${GROUP_SHORT[group]}`}
-          value={value ?? ''}
-          onChange={(e) => patch({ [key]: e.target.value || null })}
+          aria-label={`${slot === 'out' ? 'טיסת הלוך' : 'טיסת חזור'} – ${GROUP_SHORT[group]}`}
+          value={(slot === 'out' ? plan.outFlightId : plan.backFlightId) ?? ''}
+          onChange={(e) => patch(slot === 'out' ? { outFlightId: e.target.value || null } : { backFlightId: e.target.value || null })}
         >
-          <option value="">{flightsFor(direction).length === 0 ? 'אין עדיין אפשרויות' : 'לא נבחרה'}</option>
-          {flightsFor(direction).map((f) => (
+          <option value="">{options.length === 0 ? 'אין עדיין אפשרויות – הוסיפו למטה' : 'טרם נבחרה'}</option>
+          {options.map((f) => (
             <option key={f.id} value={f.id}>
-              {flightLabel(f)}
-              {f.date ? ` · ${shortDate(f.date)}` : ''} · {usd(flightCost(f, pax).total)}
+              {f.direction === 'round' ? 'הלוך-חזור: ' : ''}
+              {flightLabel(f)} · {usd(flightCost(f, pax).total)}
             </option>
           ))}
         </select>
-        <button className="btn" type="button" onClick={() => newFlight(direction)}>
-          + טיסה חדשה
-        </button>
-      </div>
-    </div>
-  );
+      </label>
+    );
+  };
 
   const fav = state.favorite[group] === cruise.id;
+  const tipsCount = tipsPeople(plan, pax);
 
   return (
     <div className={`card group-card group-${group}`}>
@@ -120,7 +91,7 @@ function GroupForm({ cruise, group, cards }: { cruise: Cruise; group: GroupId; c
       </div>
 
       <div className="form-grid">
-        <div className="field field-wide">
+        <label className="field field-wide">
           <span className="field-label">חדר</span>
           <select
             aria-label={`חדר – ${GROUP_SHORT[group]}`}
@@ -134,28 +105,32 @@ function GroupForm({ cruise, group, cards }: { cruise: Cruise; group: GroupId; c
               </option>
             ))}
           </select>
-          <span className="field-hint">
-            מחיר קרוז:{' '}
-            {room && room.price !== null ? <Usd value={room.price} /> : <Chip tone="yellow">לא נבחר / חסר מחיר</Chip>}{' '}
-            (נערך בחלק "מחירי הסוכנת" למטה)
-          </span>
-        </div>
+        </label>
 
-        {flightSelect('out', plan.outFlightId, 'outFlightId')}
-        {flightSelect('back', plan.backFlightId, 'backFlightId')}
+        {flightSelect('out')}
+        {result.roundTrip ? (
+          <p className="field field-wide muted small">כרטיס הלוך-חזור – אין צורך בטיסת חזור נפרדת.</p>
+        ) : (
+          flightSelect('back')
+        )}
 
         <div className="field field-wide">
           <span className="field-label">מלון בברצלונה</span>
           <div className="select-row">
             <select
               aria-label={`מלון – ${GROUP_SHORT[group]}`}
-              value={plan.hotelId ?? ''}
-              onChange={(e) => patch({ hotelId: e.target.value || null })}
+              value={plan.noHotel ? '__none__' : (plan.hotelId ?? '')}
+              onChange={(e) => {
+                const v = e.target.value;
+                patch(v === '__none__' ? { hotelId: null, noHotel: true } : { hotelId: v || null, noHotel: false });
+              }}
             >
-              <option value="">בלי מלון / לא נבחר</option>
-              {hotelsHere.map((h) => (
+              <option value="">טרם הוחלט</option>
+              <option value="__none__">לא צריך מלון</option>
+              {hotels.map((h) => (
                 <option key={h.id} value={h.id}>
-                  {h.name || 'מלון (ללא שם)'} · {usd(hotelCost(h))}
+                  {h.name || 'מלון (ללא שם)'} · {h.owner === 'both' ? 'משותף, ' : ''}
+                  {usd(hotelShare(h, group).amount)}
                 </option>
               ))}
             </select>
@@ -165,72 +140,123 @@ function GroupForm({ cruise, group, cards }: { cruise: Cruise; group: GroupId; c
           </div>
         </div>
 
-        <NumField label="טיפים" value={plan.tips} onChange={(v) => patch({ tips: v })} hint="סכום כולל לקבוצה" />
-        <NumField label="עמלת סוכנת" value={plan.agentFee} onChange={(v) => patch({ agentFee: v })} hint="עדיין לא ידוע? השאירו ריק" />
-        <NumField label="שתייה (רק אם קונים)" value={plan.drinks} onChange={(v) => patch({ drinks: v })} />
-        <NumField label="אינטרנט (רק אם קונים)" value={plan.internet} onChange={(v) => patch({ internet: v })} />
-        <NumField label="תחבורה" value={plan.transport} onChange={(v) => patch({ transport: v })} />
-        <NumField label="אחר" value={plan.other} onChange={(v) => patch({ other: v })} />
+        <div className="field field-wide tips-field">
+          <span className="field-label">טיפים לצוות (Crew tips)</span>
+          <div className="tips-row">
+            <MoneyInput ariaLabel={`טיפים – ${GROUP_SHORT[group]}`} value={plan.tips} onChange={(v) => patch({ tips: v })} />
+            <select
+              aria-label="איך הוזנו הטיפים"
+              value={plan.tipsMode}
+              onChange={(e) => patch({ tipsMode: e.target.value === 'person' ? 'person' : 'group' })}
+            >
+              <option value="group">לכל הקבוצה</option>
+              <option value="person">לאדם</option>
+            </select>
+            {plan.tipsMode === 'person' && (
+              <label className="inline-num">
+                ×
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  aria-label="מספר אנשים לטיפים"
+                  value={tipsCount}
+                  onChange={(e) => patch({ tipsPeople: e.target.value === '' ? null : Math.max(0, Math.floor(Number(e.target.value))) })}
+                />
+                אנשים
+              </label>
+            )}
+          </div>
+          <span className="field-hint">
+            לא כלול במחיר הקרוז. השאירו ריק עד שיש מספר.
+            {plan.tipsMode === 'person' && pax.infants > 0 && ' אם משלמים גם על התינוק – הגדילו את מספר האנשים.'}
+          </span>
+        </div>
+
+        <NumField
+          label="עמלת סוכן"
+          value={plan.agentFee}
+          onChange={(v) => patch({ agentFee: v })}
+          hint="לא ידוע עדיין? השאירו ריק. אין עמלה? הזינו 0."
+        />
+        <NumField label="חבילת משקאות" value={plan.drinks} onChange={(v) => patch({ drinks: v })} hint="רק אם קונים" />
+        <NumField label="אינטרנט" value={plan.internet} onChange={(v) => patch({ internet: v })} hint="רק אם קונים" />
       </div>
 
       <div className="total-box" aria-live="polite">
         <div className="total-lines">
-          {TOTAL_LABELS.filter(([k]) => result.breakdown[k] !== 0 || k === 'cruise').map(([k, label]) => (
+          {LINE_KEYS.map((k) => (
             <span key={k} className="total-line">
-              {label}: <Usd value={result.breakdown[k]} />
+              {LINE_LABEL[k]}: <LineValue line={result.lines[k]} />
             </span>
           ))}
         </div>
         <div className="total-main">
-          סה״כ (אוטומטי): <Usd value={result.total} className="total" />
+          סה״כ {GROUP_SHORT[group]}:{' '}
+          {result.room ? (
+            <Usd value={result.total} className="total" />
+          ) : (
+            <>
+              <NotEntered text="בחרו חדר כדי לראות סה״כ" />
+              {result.extras > 0 && (
+                <span className="muted small">
+                  {' '}
+                  (בלי הקרוז: <Usd value={result.extras} />)
+                </span>
+              )}
+            </>
+          )}
         </div>
-        {result.missing.includes('room') && <Chip tone="yellow">לא נבחר חדר</Chip>}
-        {result.missing.includes('cruisePrice') && <Chip tone="red">לחדר שנבחר אין מחיר</Chip>}
+        <NoticeList notices={result.notices} />
         <p className="muted small">
-          {pax.adults} מבוגרים{pax.infants > 0 ? ` + ${pax.infants} תינוק` : ''} · שדה ריק נחשב 0
+          תחבורה ועלויות אחרות – בטבלה בתחתית העמוד. שדה ריק = "טרם הוזן" (נספר כ-0 בסכום).
         </p>
       </div>
     </div>
   );
 }
 
-// ---------- flight options ----------
+// ---------- flight options of a group ----------
 
-const PRICE_ROWS: { key: 'base' | 'seat' | 'baggage' | 'other'; label: string }[] = [
-  { key: 'base', label: 'מחיר טיסה' },
+const PRICE_ROWS: { key: PriceRow; label: string }[] = [
+  { key: 'fare', label: 'מחיר טיסה' },
   { key: 'seat', label: 'מושב' },
   { key: 'baggage', label: 'מזוודה' },
-  { key: 'other', label: 'תוספות אחרות' },
 ];
 
 function FlightCard({ flight, cards }: { flight: Flight; cards: Cards }) {
   const { state, dispatch } = useApp();
   const isOpen = cards.open.has(flight.id);
-  const groups = activeGroups(state);
+  const pax = state.passengers[flight.group];
+  const slots = passengerSlots(pax);
+  const cost = flightCost(flight, pax);
+  const other: GroupId = flight.group === 'A' ? 'B' : 'A';
   const set = (patch: Partial<Flight>) => dispatch({ type: 'updateFlight', id: flight.id, patch });
-  const setPrice = (key: 'base' | 'seat' | 'baggage' | 'other', who: keyof PerPassenger, v: number | null) =>
-    set({ [key]: { ...flight[key], [who]: v } });
-  const hasInfants = groups.some((g) => state.passengers[g].infants > 0);
-
-  const meta = [shortDate(flight.date), flight.depTime && flight.arrTime ? `${flight.depTime}→${flight.arrTime}` : '', stopsLabel(flight.stops)]
-    .filter(Boolean)
-    .join(' · ');
+  const round = flight.direction === 'round';
+  const details = flightDetails(flight);
 
   return (
     <div className="card flight-card" id={`card-${flight.id}`}>
       <div className="card-head">
         <div>
-          <strong>{flightLabel(flight)}</strong>
-          {meta && <span className="muted"> · {meta}</span>}
+          <Chip tone="blue">{DIRECTION_LABEL[flight.direction]}</Chip> <strong>{flightLabel(flight)}</strong>
+          {details && <div className="muted small">{details}</div>}
         </div>
         <div className="card-actions">
-          {groups.map((g) => (
-            <span key={g} className="mini-cost">
-              {GROUP_SHORT[g]}: <Usd value={flightCost(flight, state.passengers[g]).total} />
-            </span>
-          ))}
+          <span className="mini-cost">
+            סה״כ <Usd value={cost.total} />
+          </span>
           <button className="btn" onClick={() => cards.toggle(flight.id)} aria-expanded={isOpen}>
             {isOpen ? 'סגור' : 'ערוך'}
+          </button>
+          <button
+            className="btn"
+            onClick={() => {
+              const newId = uid('f');
+              dispatch({ type: 'copyFlight', id: flight.id, newId, group: other });
+            }}
+          >
+            העתק ל{GROUP_LABEL[other]}
           </button>
           <button
             className="btn btn-danger"
@@ -246,71 +272,86 @@ function FlightCard({ flight, cards }: { flight: Flight; cards: Cards }) {
       {isOpen && (
         <div className="card-body">
           <div className="form-grid">
+            <label className="field">
+              <span className="field-label">סוג</span>
+              <select value={flight.direction} onChange={(e) => set({ direction: e.target.value as FlightDirection })}>
+                <option value="out">הלוך</option>
+                <option value="back">חזור</option>
+                <option value="round">הלוך-חזור (מחיר אחד לשני הכיוונים)</option>
+              </select>
+            </label>
             <TextField label="חברת תעופה" value={flight.airline} onChange={(v) => set({ airline: v })} />
             <TextField label="מספר טיסה" value={flight.flightNo} onChange={(v) => set({ flightNo: v })} />
             <TextField label="תאריך" type="date" value={flight.date} onChange={(v) => set({ date: v })} />
             <TextField label="שעת יציאה" type="time" value={flight.depTime} onChange={(v) => set({ depTime: v })} />
             <TextField label="שעת נחיתה" type="time" value={flight.arrTime} onChange={(v) => set({ arrTime: v })} />
-            <TextField label="שדה תעופה / מסלול" value={flight.airport} onChange={(v) => set({ airport: v })} placeholder="TLV → BCN" />
-            <NumField label="מספר עצירות" unit="" step="1" value={flight.stops} onChange={(v) => set({ stops: v })} hint="0 = ישירה, ריק = לא ידוע" />
-            <TextField label="זמן כולל" value={flight.duration} onChange={(v) => set({ duration: v })} placeholder="4:35" />
-            <TextField label="כבודה כלולה" value={flight.baggageInfo} onChange={(v) => set({ baggageInfo: v })} placeholder="תיק יד בלבד / 23 ק״ג" wide />
+            <TextField label="שדה יציאה" value={flight.fromAirport} onChange={(v) => set({ fromAirport: v })} placeholder="TLV" />
+            <TextField label="שדה נחיתה" value={flight.toAirport} onChange={(v) => set({ toAirport: v })} placeholder="BCN" />
+            <NumField label="מספר עצירות" unit="" step="1" placeholder="לא ידוע" value={flight.stops} onChange={(v) => set({ stops: v })} hint="0 = ישירה" />
+            <TextField label="משך טיסה" value={flight.duration} onChange={(v) => set({ duration: v })} placeholder="4:35" />
           </div>
 
-          <h4>מחירים לנוסע ($)</h4>
-          <table className="price-grid">
-            <thead>
-              <tr>
-                <th scope="col" />
-                <th scope="col">מבוגר</th>
-                <th scope="col">תינוק</th>
-              </tr>
-            </thead>
-            <tbody>
-              {PRICE_ROWS.map(({ key, label }) => (
-                <tr key={key}>
-                  <th scope="row">{label}</th>
-                  {(['adult', 'infant'] as const).map((who) => (
-                    <td key={who}>
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        min={0}
-                        step="any"
-                        dir="ltr"
-                        placeholder="0"
-                        aria-label={`${label} – ${who === 'adult' ? 'מבוגר' : 'תינוק'}`}
-                        value={flight[key][who] ?? ''}
-                        onChange={(e) => setPrice(key, who, e.target.value === '' ? null : Number(e.target.value))}
-                      />
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {hasInfants && infantPriceMissing(flight) && (
-            <p>
-              <Chip tone="yellow">מחיר תינוק לא הוזן – נחשב 0$. אם התינוק משלם, הזינו.</Chip>
-            </p>
+          {round && (
+            <>
+              <h4>פרטי החזור</h4>
+              <div className="form-grid">
+                <TextField label="מספר טיסה (חזור)" value={flight.returnFlightNo} onChange={(v) => set({ returnFlightNo: v })} />
+                <TextField label="תאריך (חזור)" type="date" value={flight.returnDate} onChange={(v) => set({ returnDate: v })} />
+                <TextField label="שעת יציאה (חזור)" type="time" value={flight.returnDepTime} onChange={(v) => set({ returnDepTime: v })} />
+                <TextField label="שעת נחיתה (חזור)" type="time" value={flight.returnArrTime} onChange={(v) => set({ returnArrTime: v })} />
+                <NumField label="עצירות (חזור)" unit="" step="1" placeholder="לא ידוע" value={flight.returnStops} onChange={(v) => set({ returnStops: v })} />
+                <TextField label="משך (חזור)" value={flight.returnDuration} onChange={(v) => set({ returnDuration: v })} />
+              </div>
+            </>
           )}
 
-          <div className="form-grid">
-            <TextField label="הערות" value={flight.notes} onChange={(v) => set({ notes: v })} wide />
+          <h4>מחירים לכל נוסע ($){round ? ' – לשני הכיוונים' : ''}</h4>
+          <div className="table-scroll">
+            <table className="price-grid">
+              <thead>
+                <tr>
+                  <th scope="col" />
+                  {slots.map((s) => (
+                    <th scope="col" key={s.id}>
+                      {s.label}
+                    </th>
+                  ))}
+                  <th scope="col" className="row-sum">
+                    סה״כ
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {PRICE_ROWS.map(({ key, label }) => (
+                  <tr key={key}>
+                    <th scope="row">{label}</th>
+                    {slots.map((s) => (
+                      <td key={s.id}>
+                        <MoneyInput
+                          unit=""
+                          ariaLabel={`${label} – ${s.label}`}
+                          placeholder={s.kind === 'infant' ? 'לא חויב' : 'טרם הוזן'}
+                          value={flight[key][s.id] ?? null}
+                          onChange={(v) => dispatch({ type: 'setFlightPrice', id: flight.id, row: key, slotId: s.id, value: v })}
+                        />
+                      </td>
+                    ))}
+                    <td className="row-sum">
+                      <Usd value={key === 'fare' ? cost.fare : key === 'seat' ? cost.seats : cost.baggage} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
+          <p className="muted small">
+            תינוק לא מחויב עד שמזינים לו מחיר (גם $0 הוא מחיר שהוזן). מושבים ומזוודות נספרים בנפרד מהטיסה.
+          </p>
+          {cost.missingAdultFare.length > 0 && <Chip tone="yellow">🟡 חסר מחיר טיסה: {cost.missingAdultFare.join(', ')}</Chip>}
 
-          <div className="card-foot muted small">
-            {groups.map((g) => {
-              const c = flightCost(flight, state.passengers[g]);
-              return (
-                <div key={g}>
-                  {GROUP_SHORT[g]} ({state.passengers[g].adults} מבוגרים
-                  {state.passengers[g].infants > 0 ? ` + ${state.passengers[g].infants} תינוק` : ''}): טיסה <Usd value={c.base} /> · מושבים{' '}
-                  <Usd value={c.seats} /> · מזוודות <Usd value={c.baggage} /> · אחר <Usd value={c.other} /> · סה״כ{' '}
-                  <Usd value={c.total} />
-                </div>
-              );
-            })}
+          <div className="form-grid">
+            <TextField label="כבודה כלולה" value={flight.baggageInfo} onChange={(v) => set({ baggageInfo: v })} placeholder="תיק יד בלבד / 23 ק״ג" />
+            <TextField label="הערות" value={flight.notes} onChange={(v) => set({ notes: v })} wide />
           </div>
         </div>
       )}
@@ -318,36 +359,43 @@ function FlightCard({ flight, cards }: { flight: Flight; cards: Cards }) {
   );
 }
 
-function FlightSection({ cruise, cards }: { cruise: Cruise; cards: Cards }) {
+function GroupFlights({ cruise, group, cards }: { cruise: Cruise; group: GroupId; cards: Cards }) {
   const { state, dispatch } = useApp();
+  const list = state.flights.filter((f) => f.cruiseId === cruise.id && f.group === group);
   const add = (direction: FlightDirection) => {
-    const f = emptyFlight(cruise.id, direction);
+    const f = emptyFlight(cruise.id, group, direction);
     dispatch({ type: 'addFlight', flight: f });
+    const plan = state.plans[cruise.id]?.[group];
+    // Select the new option automatically if nothing is selected yet for that slot.
+    if (plan && direction !== 'back' && !plan.outFlightId) {
+      dispatch({ type: 'updatePlan', cruiseId: cruise.id, group, patch: { outFlightId: f.id } });
+    }
+    if (plan && direction === 'back' && !plan.backFlightId) {
+      dispatch({ type: 'updatePlan', cruiseId: cruise.id, group, patch: { backFlightId: f.id } });
+    }
     cards.show(f.id);
   };
   return (
-    <Section
-      title="אפשרויות טיסה"
-      hint="אפשר להוסיף כמה אפשרויות לאותו תאריך. בחרו מהן בטופס של כל קבוצה (למעלה). המחיר מוזן לנוסע, והמערכת מכפילה לפי מספר הנוסעים של כל קבוצה."
-    >
-      {(['out', 'back'] as const).map((direction) => {
-        const list = state.flights.filter((f) => f.cruiseId === cruise.id && f.direction === direction);
-        return (
-          <div key={direction} className="flight-group">
-            <div className="section-head">
-              <h3>{direction === 'out' ? 'טיסות הלוך (לברצלונה)' : 'טיסות חזור (מברצלונה)'}</h3>
-              <button className="btn" onClick={() => add(direction)}>
-                + הוסף טיסה
-              </button>
-            </div>
-            {list.length === 0 && <p className="muted small">אין עדיין אפשרויות.</p>}
-            {list.map((f) => (
-              <FlightCard key={f.id} flight={f} cards={cards} />
-            ))}
-          </div>
-        );
-      })}
-    </Section>
+    <div className="flight-group">
+      <div className="section-head">
+        <h3>אפשרויות טיסה – {GROUP_SHORT[group]}</h3>
+        <div className="btn-row">
+          <button className="btn" onClick={() => add('out')}>
+            + טיסת הלוך
+          </button>
+          <button className="btn" onClick={() => add('back')}>
+            + טיסת חזור
+          </button>
+          <button className="btn" onClick={() => add('round')}>
+            + כרטיס הלוך-חזור
+          </button>
+        </div>
+      </div>
+      {list.length === 0 && <p className="muted small">אין עדיין אפשרויות טיסה לקבוצה הזו בתאריך הזה.</p>}
+      {list.map((f) => (
+        <FlightCard key={f.id} flight={f} cards={cards} />
+      ))}
+    </div>
   );
 }
 
@@ -359,27 +407,23 @@ function HotelCard({ hotel, cruise, cards }: { hotel: Hotel; cruise: Cruise; car
   const set = (patch: Partial<Hotel>) => dispatch({ type: 'updateHotel', id: hotel.id, patch });
   const { nights, fromDates } = hotelNights(hotel);
   const issues = hotelIssues(hotel, cruise);
-  const cost = hotelCost(hotel);
-  const groupText: Record<HotelGroup, string> = {
-    A: GROUP_SHORT.A,
-    B: GROUP_SHORT.B,
-    both: 'שתי הקבוצות',
-  };
-  const used = (['A', 'B'] as const).filter((g) => state.plans[cruise.id]?.[g].hotelId === hotel.id);
+  const shareA = hotelShare(hotel, 'A');
+  const shareB = hotelShare(hotel, 'B');
+  const usedBy = GROUPS.filter((g) => state.plans[cruise.id]?.[g].hotelId === hotel.id);
 
   return (
     <div className="card hotel-card" id={`card-${hotel.id}`}>
       <div className="card-head">
         <div>
           <strong>{hotel.name || 'מלון (ללא שם)'}</strong>
-          <span className="muted">
-            {' '}
-            · {groupText[hotel.group]} · {nights} לילות
-          </span>
+          <div className="muted small">
+            {OWNER_LABEL[hotel.owner]} · {nights} לילות
+            {usedBy.length > 0 && ` · נבחר ע״י: ${usedBy.map((g) => GROUP_SHORT[g]).join(', ')}`}
+          </div>
         </div>
         <div className="card-actions">
           <span className="mini-cost">
-            <Usd value={cost} />
+            סה״כ <Usd value={hotelCost(hotel)} />
           </span>
           <button className="btn" onClick={() => cards.toggle(hotel.id)} aria-expanded={isOpen}>
             {isOpen ? 'סגור' : 'ערוך'}
@@ -395,44 +439,61 @@ function HotelCard({ hotel, cruise, cards }: { hotel: Hotel; cruise: Cruise; car
         </div>
       </div>
       {issues.map((i) => (
-        <p key={i}>
-          <Chip tone="red">{i}</Chip>
-        </p>
+        <Chip key={i} tone="red">
+          🔴 {i}
+        </Chip>
       ))}
+      {(shareA.problem || shareB.problem) && <Chip tone="red">🔴 {shareA.problem ?? shareB.problem}</Chip>}
       {isOpen && (
         <div className="card-body">
           <div className="form-grid">
             <label className="field">
               <span className="field-label">שייך ל</span>
-              <select value={hotel.group} onChange={(e) => set({ group: e.target.value as HotelGroup })}>
+              <select value={hotel.owner} onChange={(e) => set({ owner: e.target.value as Owner })}>
                 <option value="A">{GROUP_LABEL.A}</option>
                 <option value="B">{GROUP_LABEL.B}</option>
-                <option value="both">שתי הקבוצות (כל קבוצה משלמת את הסכום)</option>
+                <option value="both">שתי הקבוצות (משותף)</option>
               </select>
             </label>
+            {hotel.owner === 'both' && (
+              <label className="field">
+                <span className="field-label">חלוקה</span>
+                <select value={hotel.split} onChange={(e) => set({ split: e.target.value === 'custom' ? 'custom' : 'half' })}>
+                  <option value="half">50/50</option>
+                  <option value="custom">סכום ידני לקבוצה A (השאר לקבוצה B)</option>
+                </select>
+              </label>
+            )}
+            {hotel.owner === 'both' && hotel.split === 'custom' && (
+              <NumField label="כמה משלמת קבוצה A" value={hotel.shareA} onChange={(v) => set({ shareA: v })} />
+            )}
             <TextField label="שם המלון" value={hotel.name} onChange={(v) => set({ name: v })} />
-            <TextField label="כניסה" type="date" value={hotel.checkIn} onChange={(v) => set({ checkIn: v })} />
-            <TextField label="יציאה" type="date" value={hotel.checkOut} onChange={(v) => set({ checkOut: v })} />
+            <TextField label="Check-in" type="date" value={hotel.checkIn} onChange={(v) => set({ checkIn: v })} />
+            <TextField label="Check-out" type="date" value={hotel.checkOut} onChange={(v) => set({ checkOut: v })} />
             {fromDates ? (
               <div className="field">
-                <span className="field-label">לילות</span>
+                <span className="field-label">מספר לילות</span>
                 <span className="readonly">{nights} (לפי התאריכים)</span>
               </div>
             ) : (
-              <NumField label="לילות" unit="" step="1" value={hotel.manualNights} onChange={(v) => set({ manualNights: v })} hint="או הזינו תאריכים" />
+              <NumField label="מספר לילות" unit="" step="1" value={hotel.manualNights} onChange={(v) => set({ manualNights: v })} hint="או הזינו תאריכים" />
             )}
-            <NumField label="מחיר ללילה (לחדר)" value={hotel.pricePerNight} onChange={(v) => set({ pricePerNight: v })} />
+            <NumField label="מחיר ללילה" value={hotel.pricePerNight} onChange={(v) => set({ pricePerNight: v })} />
             <NumField label="מסים (סה״כ)" value={hotel.taxes} onChange={(v) => set({ taxes: v })} />
-            <NumField label="מס עירייה (סה״כ)" value={hotel.cityTax} onChange={(v) => set({ cityTax: v })} />
-            <NumField label="ארוחת בוקר (סה״כ, אם לא כלולה)" value={hotel.breakfast} onChange={(v) => set({ breakfast: v })} />
+            <NumField label="City tax / מס מקומי (סה״כ)" value={hotel.cityTax} onChange={(v) => set({ cityTax: v })} />
+            <NumField label="ארוחת בוקר (סה״כ)" value={hotel.breakfast} onChange={(v) => set({ breakfast: v })} />
             <NumField label="עלויות נוספות (סה״כ)" value={hotel.other} onChange={(v) => set({ other: v })} />
             <TextField label="הערות" value={hotel.notes} onChange={(v) => set({ notes: v })} wide />
           </div>
-          <div className="card-foot muted small">
-            סה״כ מלון: <Usd value={cost} />
-            {used.length > 0 && <> · נבחר ע״י: {used.map((g) => GROUP_SHORT[g]).join(', ')}</>}
-            <br />
-            כל הסכומים בדולרים. אם קיבלתם מחיר ביורו – המירו לפני ההזנה.
+          <div className="card-foot">
+            סה״כ מלון: <Usd value={hotelCost(hotel)} />
+            {hotel.owner === 'both' && !shareA.problem && (
+              <>
+                {' '}
+                · קבוצה A: <Usd value={shareA.amount} /> · קבוצה B: <Usd value={shareB.amount} />
+              </>
+            )}
+            <div className="muted small">כל הסכומים בדולרים. מחיר ביורו – המירו לפני ההזנה.</div>
           </div>
         </div>
       )}
@@ -445,8 +506,8 @@ function HotelSection({ cruise, cards }: { cruise: Cruise; cards: Cards }) {
   const list = state.hotels.filter((h) => h.cruiseId === cruise.id);
   return (
     <Section
-      title="אפשרויות מלון בברצלונה"
-      hint="מלון שייך לקבוצה אחת, או לשתיהן. אם לשתי הקבוצות מחיר שונה – הוסיפו שני מלונות."
+      title="מלון בברצלונה (לפני הקרוז)"
+      hint="מלון שייך לקבוצה A, לקבוצה B או לשתיהן (אז מחלקים 50/50 או לפי סכום). את המלון בוחרים בטופס של כל קבוצה."
       actions={
         <button
           className="btn"
@@ -460,9 +521,71 @@ function HotelSection({ cruise, cards }: { cruise: Cruise; cards: Cards }) {
         </button>
       }
     >
-      {list.length === 0 && <p className="muted small">אין עדיין מלונות. אם מגיעים ישר לנמל – אפשר להשאיר ריק.</p>}
+      {list.length === 0 && <p className="muted small">אין עדיין מלונות לתאריך הזה.</p>}
       {list.map((h) => (
         <HotelCard key={h.id} hotel={h} cruise={cruise} cards={cards} />
+      ))}
+    </Section>
+  );
+}
+
+// ---------- transport / other rows ----------
+
+function ItemRow({ item }: { item: ExtraItem }) {
+  const { dispatch } = useApp();
+  const set = (patch: Partial<ExtraItem>) => dispatch({ type: 'updateItem', id: item.id, patch });
+  return (
+    <div className="item-row">
+      <label className="field">
+        <span className="field-label">סוג</span>
+        <select value={item.category} onChange={(e) => set({ category: e.target.value as ItemCategory })}>
+          <option value="transport">תחבורה</option>
+          <option value="other">אחר</option>
+        </select>
+      </label>
+      <TextField label="מה" value={item.name} onChange={(v) => set({ name: v })} placeholder={item.category === 'transport' ? 'שדה תעופה → מלון' : 'אטרקציה / ארוחה'} />
+      <NumField label="סכום" value={item.amount} onChange={(v) => set({ amount: v })} />
+      <label className="field">
+        <span className="field-label">קבוצה</span>
+        <select value={item.owner} onChange={(e) => set({ owner: e.target.value as Owner })}>
+          <option value="A">{GROUP_LABEL.A}</option>
+          <option value="B">{GROUP_LABEL.B}</option>
+          <option value="both">שתיהן – חצי-חצי</option>
+        </select>
+      </label>
+      <TextField label="הערה" value={item.note} onChange={(v) => set({ note: v })} />
+      <div className="field">
+        <span className="field-label">&nbsp;</span>
+        <button className="btn btn-danger" aria-label={`מחק ${item.name || 'שורה'}`} onClick={() => dispatch({ type: 'removeItem', id: item.id })}>
+          מחק
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ItemsSection({ cruise }: { cruise: Cruise }) {
+  const { state, dispatch } = useApp();
+  const list = state.items.filter((i) => i.cruiseId === cruise.id);
+  const add = (category: ItemCategory) => dispatch({ type: 'addItem', item: emptyItem(cruise.id, category, 'A') });
+  return (
+    <Section
+      title="תחבורה ועלויות אחרות"
+      hint="כל שורה: מה, כמה, לאיזו קבוצה. לדוגמה: מונית שדה תעופה → מלון, רכבת, מלון → נמל, אטרקציה, ארוחה, חניה."
+      actions={
+        <>
+          <button className="btn" onClick={() => add('transport')}>
+            + תחבורה
+          </button>
+          <button className="btn" onClick={() => add('other')}>
+            + עלות אחרת
+          </button>
+        </>
+      }
+    >
+      {list.length === 0 && <p className="muted small">אין עדיין שורות לתאריך הזה.</p>}
+      {list.map((i) => (
+        <ItemRow key={i.id} item={i} />
       ))}
     </Section>
   );
@@ -475,9 +598,9 @@ function RoomsSection({ cruise }: { cruise: Cruise }) {
   return (
     <details className="section details-box">
       <summary>
-        <h2 className="inline">מחירי הסוכנת – חדרים (עריכה)</h2>
+        <h2 className="inline">מחירי הסוכן – חדרים (עריכה)</h2>
       </summary>
-      <p className="muted">מחירי קרוז בלבד, כולל מיסים, לפי הסוכנת. אין התאמה אוטומטית של חדר לפי השם.</p>
+      <p className="muted">מחירי קרוז בלבד, כולל מיסים, כפי שנמסרו. סוג החדר והמחיר נפרדים – אין הנחה שחדר יקר יותר הוא טוב יותר.</p>
       {GROUPS.map((g) => (
         <div key={g} className="rooms-group">
           <h3>{GROUP_LABEL[g]}</h3>
@@ -488,45 +611,26 @@ function RoomsSection({ cruise }: { cruise: Cruise }) {
                 aria-label="שם חדר"
                 value={r.name}
                 placeholder="שם החדר"
-                onChange={(e) =>
-                  dispatch({ type: 'updateRoom', cruiseId: cruise.id, group: g, roomId: r.id, patch: { name: e.target.value } })
-                }
+                onChange={(e) => dispatch({ type: 'updateRoom', cruiseId: cruise.id, group: g, roomId: r.id, patch: { name: e.target.value } })}
               />
-              <span className="num-wrap">
-                <span className="unit" aria-hidden="true">$</span>
-                <input
-                  type="number"
-                  inputMode="decimal"
-                  min={0}
-                  step="any"
-                  dir="ltr"
-                  aria-label={`מחיר – ${r.name || 'חדר'}`}
-                  value={r.price ?? ''}
-                  placeholder="חסר"
-                  onChange={(e) =>
-                    dispatch({
-                      type: 'updateRoom',
-                      cruiseId: cruise.id,
-                      group: g,
-                      roomId: r.id,
-                      patch: { price: e.target.value === '' ? null : Number(e.target.value) },
-                    })
-                  }
-                />
-              </span>
+              <MoneyInput
+                ariaLabel={`מחיר – ${r.name || 'חדר'}`}
+                placeholder="חסר מחיר"
+                value={r.price}
+                onChange={(v) => dispatch({ type: 'updateRoom', cruiseId: cruise.id, group: g, roomId: r.id, patch: { price: v } })}
+              />
               <button
                 className="btn btn-danger"
                 aria-label={`מחק ${r.name || 'חדר'}`}
-                onClick={() => dispatch({ type: 'removeRoom', cruiseId: cruise.id, group: g, roomId: r.id })}
+                onClick={() => {
+                  if (window.confirm('למחוק את החדר?')) dispatch({ type: 'removeRoom', cruiseId: cruise.id, group: g, roomId: r.id });
+                }}
               >
                 מחק
               </button>
             </div>
           ))}
-          <button
-            className="btn"
-            onClick={() => dispatch({ type: 'addRoom', cruiseId: cruise.id, group: g, id: uid('r') })}
-          >
+          <button className="btn" onClick={() => dispatch({ type: 'addRoom', cruiseId: cruise.id, group: g, id: uid('r') })}>
             + הוסף חדר
           </button>
         </div>
@@ -541,7 +645,7 @@ function CruiseHeader({ cruise, onRemoved }: { cruise: Cruise; onRemoved: () => 
   const { dispatch } = useApp();
   const valid = cruiseDatesValid(cruise);
   return (
-    <div className="card">
+    <div className="card cruise-head">
       <div className="form-grid">
         <TextField label="תאריך יציאה" type="date" value={cruise.start} onChange={(v) => dispatch({ type: 'updateCruise', id: cruise.id, patch: { start: v } })} />
         <TextField label="תאריך חזרה" type="date" value={cruise.end} onChange={(v) => dispatch({ type: 'updateCruise', id: cruise.id, patch: { end: v } })} />
@@ -550,7 +654,7 @@ function CruiseHeader({ cruise, onRemoved }: { cruise: Cruise; onRemoved: () => 
           <button
             className="btn btn-danger"
             onClick={() => {
-              if (window.confirm('למחוק את הצעת הקרוז הזו עם כל הטיסות והמלונות שלה?')) {
+              if (window.confirm('למחוק את הצעת הקרוז הזו, כולל הטיסות, המלונות והעלויות שלה?')) {
                 dispatch({ type: 'removeCruise', id: cruise.id });
                 onRemoved();
               }
@@ -560,8 +664,8 @@ function CruiseHeader({ cruise, onRemoved }: { cruise: Cruise; onRemoved: () => 
           </button>
         </div>
       </div>
-      {!valid && (cruise.start || cruise.end) && <Chip tone="red">תאריך החזרה חייב להיות אחרי תאריך היציאה</Chip>}
-      {!cruise.start && !cruise.end && <Chip tone="yellow">הזינו תאריכים</Chip>}
+      {!valid && (cruise.start || cruise.end) && <Chip tone="red">🔴 תאריך החזרה חייב להיות אחרי תאריך היציאה</Chip>}
+      {!cruise.start && !cruise.end && <Chip tone="yellow">🟡 הזינו תאריכים</Chip>}
     </div>
   );
 }
@@ -575,6 +679,7 @@ export function EntryScreen() {
   const [scrollTo, setScrollTo] = useState<string | null>(null);
 
   const cruise = state.cruises.find((c) => c.id === selected) ?? state.cruises[0];
+  const groups = activeGroups(state);
 
   const cards: Cards = {
     open,
@@ -593,7 +698,7 @@ export function EntryScreen() {
 
   useEffect(() => {
     if (!scrollTo) return;
-    document.getElementById(`card-${scrollTo}`)?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+    document.getElementById(`card-${scrollTo}`)?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
     setScrollTo(null);
   }, [scrollTo]);
 
@@ -629,25 +734,27 @@ export function EntryScreen() {
         <>
           <CruiseHeader cruise={cruise} onRemoved={() => setSelected('')} />
 
-          <Section title="1. בחירה והזנה – כל קבוצה בנפרד">
-            <GroupForm cruise={cruise} group="A" cards={cards} />
-            {state.groupBEnabled ? (
-              <GroupForm cruise={cruise} group="B" cards={cards} />
-            ) : (
-              <div className="card muted">
-                <strong>{GROUP_LABEL.B}</strong> מוסתרת (לא מגיעים). הנתונים שהוזנו נשמרים.{' '}
-                <button className="btn" onClick={() => dispatch({ type: 'setGroupBEnabled', enabled: true })}>
-                  הצג שוב
-                </button>
-              </div>
-            )}
-          </Section>
+          {groups.map((g, i) => (
+            <Section key={g} title={`${i + 1}. ${GROUP_LABEL[g]}`} className={`group-entry group-${g}`} label={`הזנה – ${GROUP_LABEL[g]}`}>
+              <GroupForm cruise={cruise} group={g} cards={cards} />
+              <GroupFlights cruise={cruise} group={g} cards={cards} />
+            </Section>
+          ))}
+          {!state.groupBEnabled && (
+            <div className="banner banner-blue">
+              <div>🔵 {GROUP_LABEL.B} מוסתרת (לא מצטרפת). הנתונים שלה שמורים.</div>
+              <button className="btn" onClick={() => dispatch({ type: 'setGroupBEnabled', enabled: true })}>
+                להציג שוב
+              </button>
+            </div>
+          )}
 
-          <FlightSection cruise={cruise} cards={cards} />
           <HotelSection cruise={cruise} cards={cards} />
+          <ItemsSection cruise={cruise} />
           <RoomsSection cruise={cruise} />
         </>
       )}
     </div>
   );
 }
+

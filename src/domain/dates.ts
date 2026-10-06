@@ -28,29 +28,40 @@ export function addDays(iso: string, days: number): string | null {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
+// Left-to-right isolate: keeps dates in reading order inside Hebrew (RTL) text,
+// so "05/09/2027 → 12/09/2027" never turns into "12/09/2027 ← 05/09/2027".
+const LRI = '⁦';
+const PDI = '⁩';
+
+export function ltr(text: string): string {
+  return `${LRI}${text}${PDI}`;
+}
+
 /** 2027-09-05 -> 05/09 */
 export function shortDate(iso: string): string {
   const m = ISO.exec(iso);
-  return m ? `${m[3]}/${m[2]}` : '';
+  return m && parseDate(iso) !== null ? `${m[3]}/${m[2]}` : '';
 }
 
 /** 2027-09-05 -> 05/09/2027 */
 export function longDate(iso: string): string {
   const m = ISO.exec(iso);
-  return m ? `${m[3]}/${m[2]}/${m[1]}` : '';
+  return m && parseDate(iso) !== null ? `${m[3]}/${m[2]}/${m[1]}` : '';
 }
 
-// Left-to-right isolate: keeps "05/09–12/09" in reading order inside Hebrew (RTL) text.
-const LRI = '\u2066';
-const PDI = '\u2069';
-
-/** "05/09–12/09" or a placeholder when dates are missing. */
+/** Compact column title: "05/09 → 12/09". */
 export function rangeLabel(start: string, end: string): string {
   if (!shortDate(start) && !shortDate(end)) return 'תאריכים לא הוזנו';
-  return `${LRI}${shortDate(start) || '??'}–${shortDate(end) || '??'}${PDI}`;
+  return ltr(`${shortDate(start) || '??'} → ${shortDate(end) || '??'}`);
 }
 
+/** Full label: "05/09/2027 → 12/09/2027". */
 export function rangeLabelLong(start: string, end: string): string {
   if (!longDate(start) && !longDate(end)) return 'תאריכים לא הוזנו';
-  return `${LRI}${longDate(start) || '??'} – ${longDate(end) || '??'}${PDI}`;
+  return ltr(`${longDate(start) || '??'} → ${longDate(end) || '??'}`);
+}
+
+/** Short name of a cruise date used in sentences: "05/09". */
+export function dateName(start: string): string {
+  return shortDate(start) ? ltr(shortDate(start)) : 'תאריך ללא שם';
 }

@@ -1,8 +1,9 @@
-import { hotelServesGroup } from './calc';
+import { flightFitsSlot, hotelServesGroup } from './calc';
 import { initialState, plansFor, uid } from './seed';
 import type {
   AppState,
   Cruise,
+  ExtraItem,
   Flight,
   GroupId,
   Hotel,
@@ -13,6 +14,8 @@ import type {
   Term,
 } from './types';
 import { GROUPS } from './types';
+
+export type PriceRow = 'fare' | 'seat' | 'baggage';
 
 export type Action =
   | { type: 'setGroupBEnabled'; enabled: boolean }
@@ -26,23 +29,24 @@ export type Action =
   | { type: 'updatePlan'; cruiseId: string; group: GroupId; patch: Partial<Plan> }
   | { type: 'setFavorite'; group: GroupId; cruiseId: string | null }
   | { type: 'addFlight'; flight: Flight }
-  | { type: 'updateFlight'; id: string; patch: Partial<Flight> }
+  | { type: 'updateFlight'; id: string; patch: Partial<Omit<Flight, 'id' | 'cruiseId' | 'group'>> }
+  | { type: 'setFlightPrice'; id: string; row: PriceRow; slotId: string; value: Money }
+  | { type: 'copyFlight'; id: string; newId: string; group: GroupId }
   | { type: 'removeFlight'; id: string }
   | { type: 'addHotel'; hotel: Hotel }
-  | { type: 'updateHotel'; id: string; patch: Partial<Hotel> }
+  | { type: 'updateHotel'; id: string; patch: Partial<Omit<Hotel, 'id' | 'cruiseId'>> }
   | { type: 'removeHotel'; id: string }
+  | { type: 'addItem'; item: ExtraItem }
+  | { type: 'updateItem'; id: string; patch: Partial<Omit<ExtraItem, 'id' | 'cruiseId'>> }
+  | { type: 'removeItem'; id: string }
   | { type: 'setDeposit'; group: GroupId; value: Money }
-  | { type: 'updateTerm'; id: string; patch: Partial<Pick<Term, 'status' | 'note' | 'said'>> }
+  | { type: 'updateTerm'; id: string; patch: Partial<Pick<Term, 'status' | 'note'>> }
+  | { type: 'setNotes'; notes: string }
   | { type: 'replaceAll'; state: AppState }
   | { type: 'reset' };
 
 /** Change one group's plan on one cruise. Nothing else is touched. */
-function mapPlan(
-  state: AppState,
-  cruiseId: string,
-  group: GroupId,
-  fn: (p: Plan) => Plan,
-): AppState {
+function mapPlan(state: AppState, cruiseId: string, group: GroupId, fn: (p: Plan) => Plan): AppState {
   const cruisePlans = state.plans[cruiseId];
   if (!cruisePlans) return state;
   return {
@@ -51,7 +55,7 @@ function mapPlan(
   };
 }
 
-/** Clear references to a flight/hotel that no longer exists or no longer fits. */
+/** Used to clear references to a flight/hotel that no longer exists or no longer fits. */
 function mapAllPlans(state: AppState, fn: (p: Plan, cruiseId: string, group: GroupId) => Plan): AppState {
   const plans: AppState['plans'] = {};
   for (const [cruiseId, byGroup] of Object.entries(state.plans)) {
@@ -60,42 +64,46 @@ function mapAllPlans(state: AppState, fn: (p: Plan, cruiseId: string, group: Gro
   return { ...state, plans };
 }
 
+function clearInvalidFlightRefs(state: AppState): AppState {
+  return mapAllPlans(state, (p, cruiseId, group) => {
+    const ok = (id: string | null, slot: 'out' | 'back') =>
+      id !== null &&
+      state.flights.some((f) => f.id === id && f.cruiseId === cruiseId && f.group === group && flightFitsSlot(f, slot));
+    const outFlightId = ok(p.outFlightId, 'out') ? p.outFlightId : null;
+    const backFlightId = ok(p.backFlightId, 'back') ? p.backFlightId : null;
+    return outFlightId === p.outFlightId && backFlightId === p.backFlightId ? p : { ...p, outFlightId, backFlightId };
+  });
+}
+
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case 'setGroupBEnabled':
+      // Only visibility changes. Group B data is kept, and nothing of group A is touched.
       return { ...state, groupBEnabled: action.enabled };
 
-    case 'setPassengers':
+    case 'setPassengers': {
+      const clean = (v: number | undefined, d: number) =>
+        typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(9, Math.floor(v))) : d;
+      const cur = state.passengers[action.group];
       return {
         ...state,
         passengers: {
           ...state.passengers,
-          [action.group]: { ...state.passengers[action.group], ...action.patch },
+          [action.group]: { adults: clean(action.patch.adults, cur.adults), infants: clean(action.patch.infants, cur.infants) },
         },
       };
+    }
 
     case 'addCruise': {
       const last = state.cruises[state.cruises.length - 1];
       const copyRooms = (g: GroupId): Room[] =>
         (last?.rooms[g] ?? []).map((r) => ({ id: uid('r'), name: r.name, price: null }));
-      const cruise: Cruise = {
-        id: action.id,
-        start: '',
-        end: '',
-        rooms: { A: copyRooms('A'), B: copyRooms('B') },
-      };
-      return {
-        ...state,
-        cruises: [...state.cruises, cruise],
-        plans: { ...state.plans, [cruise.id]: plansFor() },
-      };
+      const cruise: Cruise = { id: action.id, start: '', end: '', rooms: { A: copyRooms('A'), B: copyRooms('B') } };
+      return { ...state, cruises: [...state.cruises, cruise], plans: { ...state.plans, [cruise.id]: plansFor() } };
     }
 
     case 'updateCruise':
-      return {
-        ...state,
-        cruises: state.cruises.map((c) => (c.id === action.id ? { ...c, ...action.patch } : c)),
-      };
+      return { ...state, cruises: state.cruises.map((c) => (c.id === action.id ? { ...c, ...action.patch } : c)) };
 
     case 'removeCruise': {
       const plans = { ...state.plans };
@@ -107,6 +115,7 @@ export function reducer(state: AppState, action: Action): AppState {
         cruises: state.cruises.filter((c) => c.id !== action.id),
         flights: state.flights.filter((f) => f.cruiseId !== action.id),
         hotels: state.hotels.filter((h) => h.cruiseId !== action.id),
+        items: state.items.filter((i) => i.cruiseId !== action.id),
         plans,
         favorite,
       };
@@ -117,10 +126,7 @@ export function reducer(state: AppState, action: Action): AppState {
         ...state,
         cruises: state.cruises.map((c) =>
           c.id === action.cruiseId
-            ? {
-                ...c,
-                rooms: { ...c.rooms, [action.group]: [...c.rooms[action.group], { id: action.id, name: '', price: null }] },
-              }
+            ? { ...c, rooms: { ...c.rooms, [action.group]: [...c.rooms[action.group], { id: action.id, name: '', price: null }] } }
             : c,
         ),
       };
@@ -134,9 +140,7 @@ export function reducer(state: AppState, action: Action): AppState {
                 ...c,
                 rooms: {
                   ...c.rooms,
-                  [action.group]: c.rooms[action.group].map((r) =>
-                    r.id === action.roomId ? { ...r, ...action.patch } : r,
-                  ),
+                  [action.group]: c.rooms[action.group].map((r) => (r.id === action.roomId ? { ...r, ...action.patch } : r)),
                 },
               }
             : c,
@@ -152,9 +156,7 @@ export function reducer(state: AppState, action: Action): AppState {
             : c,
         ),
       };
-      return mapPlan(next, action.cruiseId, action.group, (p) =>
-        p.roomId === action.roomId ? { ...p, roomId: null } : p,
-      );
+      return mapPlan(next, action.cruiseId, action.group, (p) => (p.roomId === action.roomId ? { ...p, roomId: null } : p));
     }
 
     case 'updatePlan':
@@ -167,47 +169,72 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, flights: [...state.flights, action.flight] };
 
     case 'updateFlight':
-      return {
+      // Changing the direction may make a selection invalid (e.g. round-trip -> return only).
+      return clearInvalidFlightRefs({
         ...state,
         flights: state.flights.map((f) => (f.id === action.id ? { ...f, ...action.patch } : f)),
+      });
+
+    case 'setFlightPrice':
+      return {
+        ...state,
+        flights: state.flights.map((f) =>
+          f.id === action.id ? { ...f, [action.row]: { ...f[action.row], [action.slotId]: action.value } } : f,
+        ),
       };
 
-    case 'removeFlight': {
-      const next = { ...state, flights: state.flights.filter((f) => f.id !== action.id) };
-      return mapAllPlans(next, (p) => ({
-        ...p,
-        outFlightId: p.outFlightId === action.id ? null : p.outFlightId,
-        backFlightId: p.backFlightId === action.id ? null : p.backFlightId,
-      }));
+    case 'copyFlight': {
+      const src = state.flights.find((f) => f.id === action.id);
+      if (!src) return state;
+      const copy: Flight = {
+        ...src,
+        id: action.newId,
+        group: action.group,
+        fare: { ...src.fare },
+        seat: { ...src.seat },
+        baggage: { ...src.baggage },
+      };
+      return { ...state, flights: [...state.flights, copy] };
     }
+
+    case 'removeFlight':
+      return clearInvalidFlightRefs({ ...state, flights: state.flights.filter((f) => f.id !== action.id) });
 
     case 'addHotel':
       return { ...state, hotels: [...state.hotels, action.hotel] };
 
     case 'updateHotel': {
       const hotels = state.hotels.map((h) => (h.id === action.id ? { ...h, ...action.patch } : h));
-      const next = { ...state, hotels };
       // If the hotel stopped serving a group, that group must not keep it selected.
-      return mapAllPlans(next, (p, _cruiseId, group) => {
+      return mapAllPlans({ ...state, hotels }, (p, _cruiseId, group) => {
         if (p.hotelId !== action.id) return p;
         const hotel = hotels.find((h) => h.id === action.id);
         return hotel && hotelServesGroup(hotel, group) ? p : { ...p, hotelId: null };
       });
     }
 
-    case 'removeHotel': {
-      const next = { ...state, hotels: state.hotels.filter((h) => h.id !== action.id) };
-      return mapAllPlans(next, (p) => (p.hotelId === action.id ? { ...p, hotelId: null } : p));
-    }
+    case 'removeHotel':
+      return mapAllPlans({ ...state, hotels: state.hotels.filter((h) => h.id !== action.id) }, (p) =>
+        p.hotelId === action.id ? { ...p, hotelId: null } : p,
+      );
+
+    case 'addItem':
+      return { ...state, items: [...state.items, action.item] };
+
+    case 'updateItem':
+      return { ...state, items: state.items.map((i) => (i.id === action.id ? { ...i, ...action.patch } : i)) };
+
+    case 'removeItem':
+      return { ...state, items: state.items.filter((i) => i.id !== action.id) };
 
     case 'setDeposit':
       return { ...state, deposit: { ...state.deposit, [action.group]: action.value } };
 
     case 'updateTerm':
-      return {
-        ...state,
-        terms: state.terms.map((t) => (t.id === action.id ? { ...t, ...action.patch } : t)),
-      };
+      return { ...state, terms: state.terms.map((t) => (t.id === action.id ? { ...t, ...action.patch } : t)) };
+
+    case 'setNotes':
+      return { ...state, notes: action.notes };
 
     case 'replaceAll':
       return action.state;

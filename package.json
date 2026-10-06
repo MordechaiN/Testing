@@ -6,11 +6,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build && node -e \"require('fs').copyFileSync('dist/index.html','cruise-compare.html')\"",
+    "build": "tsc --noEmit && vite build && node scripts/publish-build.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
-    "check": "npm run typecheck && npm run lint && npm run test"
+    "check": "npm run typecheck && npm run lint && npm run test",
+    "verify:build": "npm run build && git diff --exit-code -- index.html",
+    "smoke": "node scripts/smoke-test.mjs"
   },
   "dependencies": {
     "react": "19.3.0",
@@ -32,5 +34,8 @@
     "vite": "8.3.3",
     "vite-plugin-singlefile": "2.3.3",
     "vitest": "5.0.3"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

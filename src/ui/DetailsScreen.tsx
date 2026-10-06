@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
-import { addDays, longDate, rangeLabel } from '../domain/dates';
+import { inclusionList } from '../domain/calc';
+import { addDays, longDate, ltr, rangeLabelLong } from '../domain/dates';
 import { GROUP_LABEL } from '../domain/format';
 import { exportJson, importJson } from '../domain/storage';
 import type { TermStatus } from '../domain/types';
@@ -8,108 +9,54 @@ import { Chip, NumField, Section } from './common';
 import type { Tone } from './common';
 import { useApp } from './context';
 
-const STATUS: Record<TermStatus, { label: string; tone: Tone }> = {
-  clarify: { label: 'דורש בירור', tone: 'yellow' },
-  missing: { label: 'חסר מידע', tone: 'yellow' },
-  ok: { label: 'ברור / כלול', tone: 'green' },
-  info: { label: 'מידע / אופציונלי', tone: 'blue' },
+const STATUS: Record<TermStatus, { label: string; tone: Tone; icon: string }> = {
+  clarify: { label: 'דורש בירור', tone: 'yellow', icon: '⚠️' },
+  missing: { label: 'חסר מידע', tone: 'yellow', icon: '🟡' },
+  ok: { label: 'ברור / כלול', tone: 'green', icon: '🟢' },
+  info: { label: 'מידע / אופציונלי', tone: 'blue', icon: '🔵' },
 };
 
-function Passengers() {
-  const { state, dispatch } = useApp();
-  return (
-    <Section title="נוסעים בכל קבוצה" hint="המערכת מכפילה מחירי טיסה, מושב ומזוודה לפי המספרים האלה. תינוק משלם רק אם הזנתם לו מחיר.">
-      <div className="form-grid">
-        {GROUPS.map((g) => (
-          <div key={g} className="card">
-            <h3>{GROUP_LABEL[g]}</h3>
-            <div className="form-grid">
-              <NumField
-                label="מבוגרים"
-                unit=""
-                step="1"
-                value={state.passengers[g].adults}
-                onChange={(v) => dispatch({ type: 'setPassengers', group: g, patch: { adults: Math.max(0, Math.floor(v ?? 0)) } })}
-              />
-              <NumField
-                label="תינוקות"
-                unit=""
-                step="1"
-                value={state.passengers[g].infants}
-                onChange={(v) => dispatch({ type: 'setPassengers', group: g, patch: { infants: Math.max(0, Math.floor(v ?? 0)) } })}
-              />
-            </div>
-          </div>
-        ))}
-      </div>
-    </Section>
-  );
-}
+const SEVERITY_ICON = { green: '🟢', blue: '🔵', yellow: '🟡', red: '🔴' } as const;
 
-function Terms() {
-  const { state, dispatch } = useApp();
+function Inclusion() {
+  const { state } = useApp();
+  const { included, notIncluded } = inclusionList(state);
   return (
-    <Section
-      title="תנאים שהתקבלו מהסוכנת"
-      hint={'הטקסט בעמודה "מה נאמר" הוא ציטוט – לא פירוש שלי. נושא שדורש בירור נשאר צהוב עד שתשנו אותו.'}
-    >
-      <div className="table-scroll">
-        <table className="cmp terms">
-          <thead>
-            <tr>
-              <th scope="col">נושא</th>
-              <th scope="col">מה נאמר</th>
-              <th scope="col">סטטוס</th>
-              <th scope="col">הערה שלי</th>
-            </tr>
-          </thead>
-          <tbody>
-            {state.terms.map((t) => (
-              <tr key={t.id}>
-                <th scope="row">{t.topic}</th>
-                <td>{t.said}</td>
-                <td>
-                  <select
-                    aria-label={`סטטוס – ${t.topic}`}
-                    value={t.status}
-                    onChange={(e) => dispatch({ type: 'updateTerm', id: t.id, patch: { status: e.target.value as TermStatus } })}
-                  >
-                    {(Object.keys(STATUS) as TermStatus[]).map((k) => (
-                      <option key={k} value={k}>
-                        {STATUS[k].label}
-                      </option>
-                    ))}
-                  </select>
-                  <div>
-                    <Chip tone={STATUS[t.status].tone}>{STATUS[t.status].label}</Chip>
-                  </div>
-                </td>
-                <td>
-                  <input
-                    type="text"
-                    aria-label={`הערה – ${t.topic}`}
-                    dir="auto"
-                    value={t.note}
-                    onChange={(e) => dispatch({ type: 'updateTerm', id: t.id, patch: { note: e.target.value } })}
-                  />
-                </td>
-              </tr>
+    <Section title="מה כלול במחיר הקרוז ומה לא" label="מה כלול ומה לא">
+      <div className="two-cols">
+        <div>
+          <h3>כלול (לפי הסוכן)</h3>
+          <ul className="plain-list">
+            {included.map((i) => (
+              <li key={i.text}>
+                {SEVERITY_ICON[i.severity]} {i.text}
+              </li>
             ))}
-          </tbody>
-        </table>
+          </ul>
+        </div>
+        <div>
+          <h3>לא כלול</h3>
+          <ul className="plain-list">
+            {notIncluded.map((i) => (
+              <li key={i.text}>
+                {SEVERITY_ICON[i.severity]} {i.text}
+              </li>
+            ))}
+          </ul>
+        </div>
       </div>
     </Section>
   );
 }
 
-function Deposit() {
+function DepositAndCancel() {
   const { state, dispatch } = useApp();
   return (
     <Section title="מקדמה וביטול">
       <div className="banner banner-yellow">
         <div>
-          <strong>דורש בירור – הסוכנת מסרה נתונים סותרים:</strong> 170$ לאדם, 200$ לחדר, 540$ לזוג רגיל. 170$ לאדם לזוג הם 340$, לא
-          540$. המערכת לא בוחרת מספר. כשתקבלו תשובה, הזינו כאן את הסכום בפועל לכל קבוצה (הוא לא נכנס לחישוב המחיר הכולל).
+          <strong>⚠️ מקדמה – דורש בירור.</strong> נמסר מהסוכן: "$170 לאדם / $200 לחדר / $540 לזוג רגיל". המספרים לא מסתדרים
+          ({ltr('$170 × 2 = $340')}, לא {ltr('$540')}). המערכת לא בוחרת מספר. כשתקבלו תשובה – הזינו את המקדמה בפועל לכל קבוצה.
         </div>
       </div>
       <div className="form-grid">
@@ -119,28 +66,123 @@ function Deposit() {
             label={`מקדמה בפועל – ${GROUP_LABEL[g]}`}
             value={state.deposit[g]}
             onChange={(v) => dispatch({ type: 'setDeposit', group: g, value: v })}
-            hint={state.deposit[g] === null ? 'טרם נקבע' : undefined}
+            hint="תשלום על חשבון המחיר – לא מתווסף לסה״כ"
           />
         ))}
       </div>
 
-      <h3>ביטול</h3>
-      <p>
-        ככה נאמר: "אפשר לבטל עד 90 יום לפני המועד ואז הלכה המקדמה". <Chip tone="yellow">נדרש אישור בכתב</Chip>
-      </p>
-      <p className="muted small">
-        לא ברור מהניסוח מה קורה בביטול אחרי המועד הזה, ומה בדיוק נחשב "המועד". התאריכים למטה הם רק חישוב של 90 יום אחורה מיום ההפלגה:
-      </p>
+      <h3 className="mt">
+        ביטול – <Chip tone="yellow">⚠️ דורש אישור בכתב</Chip>
+      </h3>
+      <p>נמסר מהסוכן: "אפשר לבטל עד 90 יום לפני המועד ואז הלכה המקדמה".</p>
+      <p className="muted small">אין כאן פרשנות משפטית. התאריכים הם רק חישוב של 90 יום לפני יום ההפלגה:</p>
       <ul className="plain-list">
         {state.cruises.map((c) => {
           const d = addDays(c.start, -90);
           return (
             <li key={c.id}>
-              {rangeLabel(c.start, c.end)}: {d ? longDate(d) : 'הזינו תאריך הפלגה'}
+              הפלגה {rangeLabelLong(c.start, c.end)}: 90 יום לפני = <strong>{d ? ltr(longDate(d)) : 'הזינו תאריך הפלגה'}</strong>
             </li>
           );
         })}
       </ul>
+    </Section>
+  );
+}
+
+function Terms() {
+  const { state, dispatch } = useApp();
+  return (
+    <Section title="תנאי ההצעה מהסוכן" hint='העמודה "מה נאמר" היא ציטוט ולא פרשנות. אחרי בירור – שנו את הסטטוס והוסיפו הערה.'>
+      <div className="terms">
+        {state.terms.map((t) => (
+          <div key={t.id} className={`term term-${STATUS[t.status].tone}`}>
+            <div className="term-head">
+              <strong>{t.topic}</strong>
+              <Chip tone={STATUS[t.status].tone}>
+                {STATUS[t.status].icon} {STATUS[t.status].label}
+              </Chip>
+            </div>
+            <div className="term-said">"{t.said}"</div>
+            <div className="term-edit">
+              <label className="field">
+                <span className="field-label">סטטוס</span>
+                <select
+                  aria-label={`סטטוס – ${t.topic}`}
+                  value={t.status}
+                  onChange={(e) => dispatch({ type: 'updateTerm', id: t.id, patch: { status: e.target.value as TermStatus } })}
+                >
+                  {(Object.keys(STATUS) as TermStatus[]).map((k) => (
+                    <option key={k} value={k}>
+                      {STATUS[k].label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field field-grow">
+                <span className="field-label">הערה שלי</span>
+                <input
+                  type="text"
+                  aria-label={`הערה – ${t.topic}`}
+                  dir="auto"
+                  value={t.note}
+                  onChange={(e) => dispatch({ type: 'updateTerm', id: t.id, patch: { note: e.target.value } })}
+                />
+              </label>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+function Notes() {
+  const { state, dispatch } = useApp();
+  return (
+    <Section title="הערות">
+      <textarea
+        className="notes"
+        aria-label="הערות"
+        dir="auto"
+        rows={4}
+        placeholder="כל מה שחשוב לזכור (שיחות עם הסוכן, שאלות פתוחות…)"
+        value={state.notes}
+        onChange={(e) => dispatch({ type: 'setNotes', notes: e.target.value })}
+      />
+    </Section>
+  );
+}
+
+function Passengers() {
+  const { state, dispatch } = useApp();
+  return (
+    <Section title="נוסעים בכל קבוצה" hint="לכל נוסע עמודת מחיר משלו בטיסות. תינוק משלם רק אם מזינים לו מחיר.">
+      <div className="form-grid">
+        {GROUPS.map((g) => (
+          <div key={g} className="card">
+            <h3>{GROUP_LABEL[g]}</h3>
+            <div className="form-grid">
+              <NumField
+                label="מבוגרים"
+                unit=""
+                step="1"
+                placeholder="0"
+                value={state.passengers[g].adults}
+                onChange={(v) => dispatch({ type: 'setPassengers', group: g, patch: { adults: v ?? 0 } })}
+              />
+              <NumField
+                label="תינוקות"
+                unit=""
+                step="1"
+                placeholder="0"
+                value={state.passengers[g].infants}
+                onChange={(v) => dispatch({ type: 'setPassengers', group: g, patch: { infants: v ?? 0 } })}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
     </Section>
   );
 }
@@ -156,8 +198,11 @@ function Backup() {
     const a = document.createElement('a');
     a.href = url;
     a.download = 'cruise-compare-backup.json';
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setMessage({ tone: 'green', text: 'קובץ הגיבוי ירד למחשב.' });
   };
 
   const upload = async (file: File | undefined) => {
@@ -165,7 +210,7 @@ function Backup() {
     const parsed = importJson(await file.text());
     if (!parsed) {
       setMessage({ tone: 'red', text: 'הקובץ לא נראה כמו גיבוי של המערכת. לא שונה כלום.' });
-    } else {
+    } else if (window.confirm('הייבוא יחליף את כל הנתונים הנוכחיים בנתונים מהקובץ. להמשיך?')) {
       dispatch({ type: 'replaceAll', state: parsed });
       setMessage({ tone: 'green', text: 'הגיבוי נטען.' });
     }
@@ -174,21 +219,28 @@ function Backup() {
 
   return (
     <Section
-      title="גיבוי ואיפוס"
-      hint="הנתונים נשמרים אוטומטית בדפדפן הזה בלבד. כדי לעבור למחשב אחר או לשתף – ייצאו גיבוי וייבאו אותו שם."
+      title="גיבוי – ייצוא וייבוא"
+      hint="הנתונים נשמרים אוטומטית בדפדפן הזה בלבד (בכל שינוי, אין כפתור שמירה). כדי לעבור למחשב או לטלפון אחר – ייצאו קובץ וייבאו אותו שם."
     >
       <div className="btn-row">
-        <button className="btn" onClick={download}>
-          ייצוא גיבוי (קובץ)
+        <button className="btn btn-primary" onClick={download}>
+          ייצוא נתונים (JSON)
         </button>
         <button className="btn" onClick={() => fileRef.current?.click()}>
-          ייבוא גיבוי
+          ייבוא נתונים
         </button>
-        <input ref={fileRef} type="file" accept="application/json,.json" hidden aria-label="קובץ גיבוי" onChange={(e) => void upload(e.target.files?.[0])} />
+        <input
+          ref={fileRef}
+          type="file"
+          accept="application/json,.json"
+          hidden
+          aria-label="קובץ גיבוי"
+          onChange={(e) => void upload(e.target.files?.[0])}
+        />
         <button
           className="btn btn-danger"
           onClick={() => {
-            if (window.confirm('לאפס הכול ולחזור לנתונים ההתחלתיים? כל מה שהזנתם יימחק.')) {
+            if (window.confirm('לאפס הכול ולחזור לנתונים ההתחלתיים? כל מה שהזנתם יימחק. מומלץ לייצא גיבוי קודם.')) {
               dispatch({ type: 'reset' });
               setMessage({ tone: 'blue', text: 'הנתונים אופסו.' });
             }
@@ -209,8 +261,10 @@ function Backup() {
 export function DetailsScreen() {
   return (
     <div className="screen">
-      <Deposit />
+      <Inclusion />
+      <DepositAndCancel />
       <Terms />
+      <Notes />
       <Passengers />
       <Backup />
     </div>

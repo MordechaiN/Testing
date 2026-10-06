@@ -1,0 +1,147 @@
+# Every push to main: check the code, build the site, make sure GitHub Pages serves
+# exactly this build, then test the LIVE site in a real browser.
+#
+# How the site is published:
+# - Today the repository uses Pages "Deploy from a branch" (main, / root). Pages serves the
+#   committed index.html, which is the single-file production build ("npm run build").
+#   This workflow verifies that file is the fresh build and fixes it automatically if not.
+# - If Settings → Pages → Source is ever switched to "GitHub Actions", the same workflow
+#   deploys dist/ with actions/deploy-pages instead. Nothing else needs to change.
+name: Build & deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # only to commit a rebuilt index.html if someone forgot "npm run build"
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Typecheck, lint, test, build
+    runs-on: ubuntu-latest
+    outputs:
+      build_type: ${{ steps.pages.outputs.build_type }}
+      page_url: ${{ steps.pages.outputs.page_url }}
+      sha256: ${{ steps.hash.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+      - name: Read the GitHub Pages settings
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          info=$(gh api "repos/${{ github.repository }}/pages" 2>/dev/null || echo '{}')
+          build_type=$(jq -r '.build_type // "legacy"' <<<"$info")
+          page_url=$(jq -r '.html_url // empty' <<<"$info")
+          if [ -z "$page_url" ]; then
+            page_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+          fi
+          echo "build_type=$build_type" >> "$GITHUB_OUTPUT"
+          echo "page_url=$page_url" >> "$GITHUB_OUTPUT"
+          echo "GitHub Pages source: $build_type – $page_url"
+
+      - name: Fingerprint of this build
+        id: hash
+        run: echo "sha256=$(sha256sum dist/index.html | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the published index.html equal to this build (Deploy from a branch)
+        if: steps.pages.outputs.build_type != 'workflow'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet -- index.html; then
+            echo "index.html in the repository is exactly this build."
+            exit 0
+          fi
+          echo "::warning::index.html was not rebuilt before the push – committing the fresh build."
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git commit -m "Rebuild index.html for GitHub Pages"
+          git push origin HEAD:main
+          gh api -X POST "repos/${{ github.repository }}/pages/builds" || true
+
+      - name: Upload the site (only when Pages source is "GitHub Actions")
+        if: steps.pages.outputs.build_type == 'workflow'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy (Pages source "GitHub Actions")
+    needs: build
+    if: needs.build.outputs.build_type == 'workflow'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  verify:
+    name: Verify the live site
+    needs: [build, deploy]
+    if: always() && needs.build.result == 'success' && (needs.deploy.result == 'success' || needs.deploy.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Wait until GitHub Pages serves exactly this build
+        env:
+          URL: ${{ needs.build.outputs.page_url }}
+          EXPECTED: ${{ needs.build.outputs.sha256 }}
+        run: |
+          for i in $(seq 1 60); do
+            got=$(curl -fsSL "${URL}?ci=${{ github.run_id }}-${{ github.run_attempt }}-$i" | sha256sum | cut -d' ' -f1 || true)
+            if [ "$got" = "$EXPECTED" ]; then
+              echo "The live site serves this build (attempt $i)."
+              exit 0
+            fi
+            echo "attempt $i: live site not updated yet"
+            sleep 10
+          done
+          echo "::error::GitHub Pages did not serve the new build within 10 minutes"
+          exit 1
+
+      - name: Browser test against the live site
+        env:
+          URL: ${{ needs.build.outputs.page_url }}
+        run: |
+          npm install --prefix "$RUNNER_TEMP/pw" --no-save --no-audit --no-fund playwright-core@1.63.0
+          export NODE_PATH="$RUNNER_TEMP/pw/node_modules"
+          export CHROME_PATH="$(command -v google-chrome || command -v chromium)"
+          node scripts/smoke-test.mjs "$URL" --screenshots screenshots
+
+      - name: Keep screenshots of the live site
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-site-screenshots
+          path: screenshots
+          if-no-files-found: ignore
+          retention-days: 14
