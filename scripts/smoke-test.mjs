@@ -43,12 +43,49 @@ function check(ok, message) {
     console.log(`  ✗ ${message}`);
   }
 }
+
+/** Page and console problems of the page currently under test – printed when a step crashes. */
+let current = { page: null, problems: [] };
+
 async function step(name, fn) {
   console.log(`\n${name}`);
-  await fn();
+  try {
+    await fn();
+  } catch (error) {
+    failures += 1;
+    console.log(`  ✗ step crashed: ${String(error.message ?? error).split('\n').slice(0, 6).join('\n    ')}`);
+    await diagnose(name);
+    await browser.close();
+    console.log(`\n${failures} CHECK(S) FAILED`);
+    process.exit(1);
+  }
+}
+
+async function diagnose(name) {
+  const { page, problems } = current;
+  console.log('  --- diagnostics ---');
+  console.log(`  browser problems: ${problems.length === 0 ? 'none' : '\n    ' + problems.join('\n    ')}`);
+  if (!page) return;
+  try {
+    console.log(`  url: ${page.url()}`);
+    const info = await page.evaluate(() => ({
+      main: (document.querySelector('main')?.innerText ?? '(no <main>)').slice(0, 1500),
+      groupCards: document.querySelectorAll('.group-card').length,
+      selects: Array.from(document.querySelectorAll('select')).map((el) => el.getAttribute('aria-label')).slice(0, 12),
+    }));
+    console.log(`  group cards: ${info.groupCards}`);
+    console.log(`  select aria-labels: ${JSON.stringify(info.selects)}`);
+    console.log(`  page text:\n${info.main}`);
+    const dir = shotsDir ?? 'screenshots';
+    mkdirSync(dir, { recursive: true });
+    await page.screenshot({ path: join(dir, `failure-${name.split('.')[0]}.png`), fullPage: true });
+  } catch (e) {
+    console.log(`  (diagnostics failed: ${e.message})`);
+  }
 }
 
 const browser = await playwright.chromium.launch(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {});
+console.log(`Browser: ${browser.version()} · URL: ${url}`);
 
 /** Collects everything that would show up as a red line in the browser console. */
 function watch(page) {
@@ -87,6 +124,7 @@ async function totalRowText(page, group) {
 const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, acceptDownloads: true, locale: 'he-IL' });
 const page = await context.newPage();
 const problems = watch(page);
+current = { page, problems };
 
 await step('1. Page loads (JavaScript, CSS, React)', async () => {
   const response = await page.goto(url, { waitUntil: 'load' });
@@ -271,6 +309,7 @@ await step('9. Mobile (390 × 844): no horizontal overflow on any screen', async
   const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const m = await mobile.newPage();
   const mobileProblems = watch(m);
+  current = { page: m, problems: mobileProblems };
   await m.goto(url, { waitUntil: 'load' });
   for (const [button, file] of [
     ['סיכום והשוואה', 'mobile-summary.png'],

@@ -98,12 +98,15 @@ export function flightCost(flight: Flight, pax: Passengers): FlightCost {
   const fare = rowCents(flight.fare ?? {}, slots);
   const seats = rowCents(flight.seat ?? {}, slots);
   const baggage = rowCents(flight.baggage ?? {}, slots);
+  // The fare counts as entered once an adult price was typed (an infant-only "$0" is not a flight price).
+  const adults = slots.filter((s) => s.kind === 'adult');
+  const fareEntered = adults.length > 0 ? adults.some((s) => isFilled(flight.fare?.[s.id])) : fare.entered;
   return {
     fare: fromCents(fare.cents),
     seats: fromCents(seats.cents),
     baggage: fromCents(baggage.cents),
     total: fromCents(fare.cents + seats.cents + baggage.cents),
-    fareEntered: fare.entered,
+    fareEntered,
     seatsEntered: seats.entered,
     baggageEntered: baggage.entered,
     missingAdultFare: slots.filter((s) => s.kind === 'adult' && !isFilled(flight.fare?.[s.id])).map((s) => s.label),
@@ -122,6 +125,54 @@ export function flightFitsSlot(flight: Flight, slot: 'out' | 'back'): boolean {
 
 export function flightsFor(state: AppState, cruiseId: string, group: GroupId, slot: 'out' | 'back'): Flight[] {
   return state.flights.filter((f) => f.cruiseId === cruiseId && f.group === group && flightFitsSlot(f, slot));
+}
+
+export interface Itinerary {
+  legs: Flight[];
+  fare: number;
+  seats: number;
+  baggage: number;
+  total: number;
+  /** Only one direction is known so far. */
+  oneWayOnly: boolean;
+}
+
+/** A flight option is "priced" when every adult fare was typed. */
+export function flightFullyPriced(flight: Flight, pax: Passengers): boolean {
+  const c = flightCost(flight, pax);
+  return c.fareEntered && c.missingAdultFare.length === 0;
+}
+
+/**
+ * Cheapest complete trip for a group on a date: a round-trip ticket, or the cheapest
+ * one-way outbound + one-way return pair – compared on the full cost (fare + seats + baggage).
+ * Options with missing adult fares are ignored, so a half-filled option never looks cheapest.
+ */
+export function cheapestItinerary(state: AppState, cruiseId: string, group: GroupId): Itinerary | null {
+  const pax = state.passengers[group];
+  const priced = state.flights.filter((f) => f.cruiseId === cruiseId && f.group === group && flightFullyPriced(f, pax));
+  const make = (legs: Flight[], oneWayOnly: boolean): Itinerary => {
+    const costs = legs.map((f) => flightCost(f, pax));
+    const sum = (k: 'fare' | 'seats' | 'baggage') => fromCents(costs.reduce((t, c) => t + toCents(c[k]), 0));
+    return {
+      legs,
+      fare: sum('fare'),
+      seats: sum('seats'),
+      baggage: sum('baggage'),
+      total: fromCents(costs.reduce((t, c) => t + toCents(c.total), 0)),
+      oneWayOnly,
+    };
+  };
+  const cheapest = (list: Flight[]) =>
+    list.reduce<Flight | null>((best, f) => (best === null || flightCost(f, pax).total < flightCost(best, pax).total ? f : best), null);
+
+  const candidates: Itinerary[] = priced.filter((f) => f.direction === 'round').map((f) => make([f], false));
+  const out = cheapest(priced.filter((f) => f.direction === 'out'));
+  const back = cheapest(priced.filter((f) => f.direction === 'back'));
+  if (out && back) candidates.push(make([out, back], false));
+  if (candidates.length > 0) return candidates.reduce((best, c) => (toCents(c.total) < toCents(best.total) ? c : best));
+  if (out || back) return make([(out ?? back)!], true);
+  return null;
 }
 
 // ---------- hotels ----------
@@ -145,6 +196,11 @@ export function hotelTotalCents(hotel: Hotel): number {
 
 export function hotelCost(hotel: Hotel): number {
   return fromCents(hotelTotalCents(hotel));
+}
+
+/** At least one price field of the hotel was typed. */
+export function hotelHasPrice(hotel: Hotel): boolean {
+  return [hotel.pricePerNight, hotel.taxes, hotel.cityTax, hotel.breakfast, hotel.other].some(isFilled);
 }
 
 export function hotelServesGroup(hotel: Hotel, group: GroupId): boolean {
@@ -264,8 +320,11 @@ export type NoticeCode =
   | 'fare'
   | 'infantFare'
   | 'hotelUndecided'
+  | 'hotelPrice'
+  | 'hotelDates'
   | 'hotelSplit'
   | 'sharedHotel'
+  | 'sharedItems'
   | 'tips'
   | 'fee';
 
@@ -388,14 +447,26 @@ export function computePlan(state: AppState, cruiseId: string, group: GroupId, r
   // Hotel
   if (hotel) {
     const share = hotelShare(hotel, group);
-    lines.hotel = { amount: share.amount, entered: !share.problem };
+    const priced = hotelHasPrice(hotel);
+    const { nights } = hotelNights(hotel);
+    const missingNights = isFilled(hotel.pricePerNight) && nights === 0;
+    lines.hotel = { amount: share.amount, entered: priced && !missingNights && !share.problem };
+    if (!priced) notices.push({ code: 'hotelPrice', severity: 'yellow', text: 'למלון שנבחר אין עדיין מחיר' });
+    if (missingNights) notices.push({ code: 'hotelPrice', severity: 'yellow', text: 'מלון – חסר מספר לילות' });
+    for (const issue of hotelIssues(hotel, cruise)) notices.push({ code: 'hotelDates', severity: 'red', text: `מלון: ${issue}` });
     if (share.problem) notices.push({ code: 'hotelSplit', severity: 'red', text: share.problem });
-    if (hotel.owner === 'both' && !state.groupBEnabled && group === 'A') {
-      notices.push({
-        code: 'sharedHotel',
-        severity: 'blue',
-        text: 'המלון מסומן כמשותף – אם קבוצה B לא מגיעה, שנו אותו ל"קבוצה A"',
-      });
+    if (hotel.owner === 'both') {
+      const other: GroupId = group === 'A' ? 'B' : 'A';
+      const otherUses = state.groupBEnabled && state.plans[cruiseId]?.[other]?.hotelId === hotel.id;
+      if (!otherUses) {
+        notices.push({
+          code: 'sharedHotel',
+          severity: 'blue',
+          text: state.groupBEnabled
+            ? 'מלון משותף, אבל הקבוצה השנייה לא בחרה אותו – רק החלק של הקבוצה הזו נספר'
+            : 'המלון מסומן כמשותף – אם קבוצה B לא מגיעה, שנו אותו ל"קבוצה A"',
+        });
+      }
     }
   } else if (plan.noHotel) {
     lines.hotel = { amount: 0, entered: true, label: 'לא צריך' };
@@ -415,6 +486,13 @@ export function computePlan(state: AppState, cruiseId: string, group: GroupId, r
   // Transport / other rows
   lines.transport = itemsLine(state, cruiseId, group, 'transport');
   lines.other = itemsLine(state, cruiseId, group, 'other');
+  if (!state.groupBEnabled && state.items.some((i) => i.cruiseId === cruiseId && i.owner === 'both' && isFilled(i.amount))) {
+    notices.push({
+      code: 'sharedItems',
+      severity: 'blue',
+      text: 'יש עלויות משותפות (חצי-חצי) – כשקבוצה B לא מגיעה נספר רק החצי. אפשר לשנות אותן ל"קבוצה A"',
+    });
+  }
 
   const cruiseCents = toCents(lines.cruise.amount);
   const extrasCents = LINE_KEYS.filter((k) => k !== 'cruise').reduce((sum, k) => sum + toCents(lines[k].amount), 0);
@@ -491,7 +569,8 @@ export interface DateComparison {
 export function compareDates(state: AppState, group: GroupId): DateComparison {
   const columns: DateColumn[] = state.cruises.map((cruise) => {
     const selected = computePlan(state, cruise.id, group);
-    if (selected.room) return { cruise, result: selected, basis: 'selected' };
+    // A selected room without a price cannot be compared (it would look like a $0 cruise).
+    if (selected.room) return isFilled(selected.room.price) ? { cruise, result: selected, basis: 'selected' } : { cruise, result: null, basis: 'none' };
     const cheap = cheapestRoom(state, cruise.id, group);
     return cheap ? { cruise, result: cheap, basis: 'cheapest' } : { cruise, result: null, basis: 'none' };
   });
@@ -507,10 +586,15 @@ export function compareDates(state: AppState, group: GroupId): DateComparison {
     if (c.basis === 'cheapest') reasons.push(`ב-${name} טרם נבחר חדר (חושב לפי החדר הזול)`);
     const r = c.result;
     if (!r) continue;
-    if (hasNotice(r, 'roomPrice')) reasons.push(`ב-${name} לחדר שנבחר אין מחיר`);
     if (hasNotice(r, 'flight')) reasons.push(`ב-${name} חסרות טיסות`);
     else if (hasNotice(r, 'fare')) reasons.push(`ב-${name} חסר מחיר טיסה`);
-    if (hasNotice(r, 'hotelSplit')) reasons.push(`ב-${name} חלוקת המלון לא שלמה`);
+    if (hasNotice(r, 'hotelSplit') || hasNotice(r, 'hotelDates')) reasons.push(`ב-${name} יש בעיה בנתוני המלון`);
+    const missing = [
+      hasNotice(r, 'hotelUndecided') || hasNotice(r, 'hotelPrice') ? 'מלון' : null,
+      hasNotice(r, 'tips') ? 'טיפים' : null,
+      hasNotice(r, 'fee') ? 'עמלת סוכן' : null,
+    ].filter(Boolean);
+    if (missing.length > 0) reasons.push(`ב-${name} חסר: ${missing.join(', ')}`);
   }
   // A line typed for one date but not for another makes the totals not comparable.
   if (priced.length > 1) {
@@ -538,7 +622,7 @@ export function compareDates(state: AppState, group: GroupId): DateComparison {
     cheapestIndex,
     gap: gapValue,
     partial: reasons.length > 0,
-    reasons,
+    reasons: [...new Set(reasons)],
   };
 }
 
@@ -563,26 +647,36 @@ export function todoList(state: AppState): Todo[] {
   const todos: Todo[] = [];
   const plans = state.cruises.flatMap((c) => groups.map((g) => computePlan(state, c.id, g)));
 
+  for (const c of state.cruises) {
+    if (!cruiseDatesValid(c)) {
+      todos.push({ id: `dates-${c.id}`, text: `תקנו את תאריכי ההפלגה (${dateName(c.start)})`, screen: 'entry' });
+    }
+  }
   if (plans.some((p) => !p.room)) {
     todos.push({ id: 'rooms', text: 'בחרו חדר לכל קבוצה ותאריך', screen: 'summary' });
   }
+  if (plans.some((p) => hasNotice(p, 'roomPrice'))) {
+    todos.push({ id: 'room-price', text: 'הזינו מחיר לחדר שנבחר (מחירי הסוכן)', screen: 'entry' });
+  }
   for (const c of state.cruises) {
     const name = dateName(c.start);
-    const hasOptions = state.flights.some((f) => f.cruiseId === c.id && groups.includes(f.group));
+    // Options are per group: a group with no flight options must be told to check flights.
+    const groupsWithout = groups.filter((g) => !state.flights.some((f) => f.cruiseId === c.id && f.group === g));
     const datePlans = plans.filter((p) => p.cruiseId === c.id);
-    if (!hasOptions) {
-      todos.push({ id: `flights-${c.id}`, text: `בדקו טיסות ל-${name}`, screen: 'entry' });
+    if (groupsWithout.length > 0) {
+      const who = groupsWithout.length === groups.length ? '' : ` (${groupsWithout.map((g) => `קבוצה ${g}`).join(', ')})`;
+      todos.push({ id: `flights-${c.id}`, text: `בדקו טיסות ל-${name}${who}`, screen: 'entry' });
     } else if (datePlans.some((p) => hasNotice(p, 'flight'))) {
       todos.push({ id: `pick-flights-${c.id}`, text: `בחרו טיסת הלוך וחזור ל-${name}`, screen: 'entry' });
     } else if (datePlans.some((p) => hasNotice(p, 'fare'))) {
       todos.push({ id: `fare-${c.id}`, text: `השלימו מחיר טיסה ל-${name}`, screen: 'entry' });
     }
   }
-  if (plans.some((p) => hasNotice(p, 'hotelUndecided'))) {
+  if (plans.some((p) => hasNotice(p, 'hotelUndecided') || hasNotice(p, 'hotelPrice'))) {
     todos.push({ id: 'hotel', text: 'בדקו מלון בברצלונה (או סמנו "לא צריך מלון")', screen: 'entry' });
   }
-  if (plans.some((p) => hasNotice(p, 'hotelSplit'))) {
-    todos.push({ id: 'hotel-split', text: 'השלימו את חלוקת המלון המשותף', screen: 'entry' });
+  if (plans.some((p) => hasNotice(p, 'hotelSplit') || hasNotice(p, 'hotelDates'))) {
+    todos.push({ id: 'hotel-fix', text: 'תקנו את נתוני המלון (תאריכים או חלוקה)', screen: 'entry' });
   }
   if (plans.some((p) => !p.lines.tips.entered)) {
     todos.push({ id: 'tips', text: 'בררו עלות טיפים לצוות (Crew tips)', screen: 'entry' });
@@ -613,10 +707,13 @@ export function inclusionList(state: AppState): { included: InclusionItem[]; not
     { text: 'חבילת משקאות (אופציונלי)', severity: 'blue' },
     { text: 'אינטרנט (אופציונלי)', severity: 'blue' },
   ];
-  if (state.flights.length === 0) notIncluded.push({ text: 'טיסות – עדיין לא נבדקו', severity: 'yellow' });
+  if (!state.flights.some((f) => groups.includes(f.group))) notIncluded.push({ text: 'טיסות – עדיין לא נבדקו', severity: 'yellow' });
   else notIncluded.push({ text: 'טיסות – מוזנות בנפרד', severity: 'blue' });
-  if (plans.every((p) => !p.hotel)) notIncluded.push({ text: 'מלון – עדיין לא הוזן', severity: 'yellow' });
-  else notIncluded.push({ text: 'מלון – מוזן בנפרד', severity: 'blue' });
+  const anyHotelPriced = plans.some((p) => p.lines.hotel.entered && !p.lines.hotel.label);
+  const allNoHotel = plans.length > 0 && plans.every((p) => p.lines.hotel.label);
+  if (anyHotelPriced) notIncluded.push({ text: 'מלון – מוזן בנפרד', severity: 'blue' });
+  else if (allNoHotel) notIncluded.push({ text: 'מלון – לא נדרש', severity: 'blue' });
+  else notIncluded.push({ text: 'מלון – עדיין לא הוזן', severity: 'yellow' });
   if (plans.some((p) => !p.lines.agentFee.entered)) notIncluded.push({ text: 'עמלת סוכן – עדיין לא ידועה', severity: 'yellow' });
   return {
     included: [{ text: 'מיסים (לפי הסוכן)', severity: 'green' }],

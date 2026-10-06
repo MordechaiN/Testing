@@ -26,15 +26,17 @@ concurrency:
 jobs:
   build:
     name: Typecheck, lint, test, build
+    # The site is published from main only (a manual run on another branch must never push to main).
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       build_type: ${{ steps.pages.outputs.build_type }}
       page_url: ${{ steps.pages.outputs.page_url }}
       sha256: ${{ steps.hash.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -50,7 +52,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          info=$(gh api "repos/${{ github.repository }}/pages" 2>/dev/null || echo '{}')
+          if ! info=$(gh api "repos/${{ github.repository }}/pages" 2>/dev/null); then
+            echo "::warning::Could not read the Pages settings – assuming 'Deploy from a branch'."
+            info='{}'
+          fi
           build_type=$(jq -r '.build_type // "legacy"' <<<"$info")
           page_url=$(jq -r '.html_url // empty' <<<"$info")
           if [ -z "$page_url" ]; then
@@ -69,14 +74,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if git diff --quiet -- index.html; then
+          if [ -z "$(git status --porcelain -- index.html)" ]; then
             echo "index.html in the repository is exactly this build."
             exit 0
           fi
           echo "::warning::index.html was not rebuilt before the push – committing the fresh build."
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add index.html
+          git add -f index.html
           git commit -m "Rebuild index.html for GitHub Pages"
           git push origin HEAD:main
           gh api -X POST "repos/${{ github.repository }}/pages/builds" || true
@@ -97,7 +102,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
   verify:
     name: Verify the live site
@@ -105,9 +110,9 @@ jobs:
     if: always() && needs.build.result == 'success' && (needs.deploy.result == 'success' || needs.deploy.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
@@ -122,6 +127,11 @@ jobs:
               echo "The live site serves this build (attempt $i)."
               exit 0
             fi
+            # A newer push may already have replaced this build – its own run checks it.
+            if [ "$i" -ge 18 ] && [ "$(git ls-remote origin refs/heads/main | cut -f1)" != "$GITHUB_SHA" ]; then
+              echo "::notice::main moved on to a newer commit; the live site is checked by that run."
+              exit 0
+            fi
             echo "attempt $i: live site not updated yet"
             sleep 10
           done
@@ -134,12 +144,14 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/pw" --no-save --no-audit --no-fund playwright-core@1.63.0
           export NODE_PATH="$RUNNER_TEMP/pw/node_modules"
+          # The runner's up-to-date Google Chrome – the same browser real users have.
           export CHROME_PATH="$(command -v google-chrome || command -v chromium)"
+          "$CHROME_PATH" --version
           node scripts/smoke-test.mjs "$URL" --screenshots screenshots
 
       - name: Keep screenshots of the live site
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: live-site-screenshots
           path: screenshots

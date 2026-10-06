@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   bothGroupsTotal,
+  cheapestItinerary,
   cheapestRoom,
   compareDates,
   comparisonSentence,
@@ -555,5 +556,134 @@ describe('not entered vs $0 for flights', () => {
     const f = flight('c1', 'A', 'out', { fare: { 'adult-1': 0, 'adult-2': 0 } });
     const s = run(fresh(), { type: 'addFlight', flight: f }, plan('c1', 'A', { outFlightId: f.id }));
     expect(computePlan(s, 'c1', 'A').lines.flights).toEqual({ amount: 0, entered: true });
+  });
+});
+
+describe('review fixes', () => {
+  it('a selected hotel without any price is "not entered", keeps the to-do and the yellow status', () => {
+    const { state } = fullScenario();
+    const empty = hotel('c1', 'A');
+    const s = run(state, { type: 'addHotel', hotel: empty }, plan('c1', 'A', { hotelId: empty.id }));
+    const a = computePlan(s, 'c1', 'A');
+    expect(a.lines.hotel).toEqual({ amount: 0, entered: false });
+    expect(hasNotice(a, 'hotelPrice')).toBe(true);
+    expect(a.status).toBe('yellow');
+    expect(todoList(s).map((t) => t.id)).toContain('hotel');
+  });
+
+  it('a price per night without nights is flagged, not silently $0', () => {
+    const h = hotel('c1', 'A', { pricePerNight: 220 });
+    const s = run(fresh(), { type: 'addHotel', hotel: h }, plan('c1', 'A', { hotelId: h.id }));
+    const r = computePlan(s, 'c1', 'A');
+    expect(r.lines.hotel.entered).toBe(false);
+    expect(r.notices.map((n) => n.text)).toContain('מלון – חסר מספר לילות');
+  });
+
+  it('impossible hotel dates are a red problem on the plan itself', () => {
+    const h = hotel('c1', 'A', { checkIn: '2027-09-05', checkOut: '2027-09-03', pricePerNight: 220, cityTax: 14 });
+    const s = run(fresh(), { type: 'addHotel', hotel: h }, selectRoom('c1', 'A', 'c1-A1'), plan('c1', 'A', { hotelId: h.id }));
+    const r = computePlan(s, 'c1', 'A');
+    expect(hasNotice(r, 'hotelDates')).toBe(true);
+    expect(r.status).toBe('red');
+    expect(todoList(s).map((t) => t.id)).toContain('hotel-fix');
+  });
+
+  it('the comparison is partial while hotel/tips/fee are missing on every date', () => {
+    const f1 = flight('c1', 'A', 'round', { fare: { 'adult-1': 500, 'adult-2': 500 } });
+    const f2 = flight('c2', 'A', 'round', { fare: { 'adult-1': 500, 'adult-2': 500 } });
+    const s = run(
+      fresh(),
+      { type: 'addFlight', flight: f1 },
+      { type: 'addFlight', flight: f2 },
+      plan('c1', 'A', { roomId: 'c1-A1', outFlightId: f1.id }),
+      plan('c2', 'A', { roomId: 'c2-A2', outFlightId: f2.id }),
+    );
+    const cmp = compareDates(s, 'A');
+    expect(cmp.partial).toBe(true);
+    expect(cmp.reasons.map(strip)).toContain('ב-05/09 חסר: מלון, טיפים, עמלת סוכן');
+  });
+
+  it('the comparison is final only when both dates are complete', () => {
+    const { state } = fullScenario();
+    const f2 = flight('c2', 'A', 'round', { fare: { 'adult-1': 500, 'adult-2': 500, 'infant-1': 0 } });
+    const s = run(
+      state,
+      { type: 'addFlight', flight: f2 },
+      plan('c2', 'A', { roomId: 'c2-A2', outFlightId: f2.id, noHotel: true, tips: 37, agentFee: 100 }),
+    );
+    const cmp = compareDates(s, 'A');
+    // "No hotel needed" on 19/09 is a decision, so only seats/baggage differ.
+    expect(cmp.reasons.map(strip)).toEqual(['מושבים הוזנו רק ב-05/09', 'מזוודות הוזנו רק ב-05/09']);
+    const s2 = run(
+      s,
+      plan('c1', 'A', { hotelId: null, noHotel: true }),
+      { type: 'setFlightPrice', id: f2.id, row: 'seat', slotId: 'adult-1', value: 0 },
+      { type: 'setFlightPrice', id: f2.id, row: 'baggage', slotId: 'adult-1', value: 0 },
+    );
+    const final = compareDates(s2, 'A');
+    expect(final.partial).toBe(false);
+    expect(final.reasons).toEqual([]);
+  });
+
+  it('a selected room without a price is not compared as a $0 cruise', () => {
+    let s = run(fresh(), { type: 'addRoom', cruiseId: 'c2', group: 'A', id: 'noprice' });
+    s = run(s, selectRoom('c1', 'A', 'c1-A1'), selectRoom('c2', 'A', 'noprice'));
+    const cmp = compareDates(s, 'A');
+    expect(cmp.columns[1]!.basis).toBe('none');
+    expect(cmp.cheapestIndex).toBeNull();
+    expect(todoList(s).map((t) => t.id)).toContain('room-price');
+  });
+
+  it('cheapest flights: a cheaper round trip beats a one-way pair; fare-less options are ignored', () => {
+    const out = flight('c1', 'B', 'out', { airline: 'OUT', fare: { 'adult-1': 385, 'adult-2': 385 } });
+    const back = flight('c1', 'B', 'back', { airline: 'BACK', fare: { 'adult-1': 420, 'adult-2': 420 } });
+    const round = flight('c1', 'B', 'round', { airline: 'ROUND', fare: { 'adult-1': 700, 'adult-2': 700 } });
+    const seatOnly = flight('c1', 'B', 'out', { airline: 'SEATONLY', seat: { 'adult-1': 35 } });
+    const s = run(fresh(), ...[out, back, round, seatOnly].map((f) => ({ type: 'addFlight', flight: f }) as const));
+    const it = cheapestItinerary(s, 'c1', 'B')!;
+    expect(it.legs.map((f) => f.airline)).toEqual(['ROUND']);
+    expect(it.total).toBe(1400);
+    const noRound = run(s, { type: 'removeFlight', id: round.id });
+    expect(cheapestItinerary(noRound, 'c1', 'B')!.legs.map((f) => f.airline)).toEqual(['OUT', 'BACK']);
+    const onlyOut = run(noRound, { type: 'removeFlight', id: back.id });
+    expect(cheapestItinerary(onlyOut, 'c1', 'B')!.oneWayOnly).toBe(true);
+  });
+
+  it('an infant-only $0 fare does not make the flights line "entered"', () => {
+    const f = flight('c1', 'A', 'round', { fare: { 'infant-1': 0 } });
+    const s = run(fresh(), { type: 'addFlight', flight: f }, plan('c1', 'A', { outFlightId: f.id }));
+    expect(computePlan(s, 'c1', 'A').lines.flights.entered).toBe(false);
+  });
+
+  it('the to-do asks to check flights for the group that has no options', () => {
+    const { state, ids } = fullScenario();
+    const s = run(state, { type: 'removeFlight', id: ids.bRound! });
+    const todo = todoList(s).find((t) => t.id === 'flights-c1')!;
+    expect(strip(todo.text)).toBe('בדקו טיסות ל-05/09 (קבוצה B)');
+  });
+
+  it('invalid cruise dates appear in the to-do list', () => {
+    const s = run(fresh(), { type: 'updateCruise', id: 'c2', patch: { end: '2027-09-01' } });
+    expect(todoList(s).map((t) => t.id)).toContain('dates-c2');
+  });
+
+  it('flights of a hidden group B do not count as "flights entered"', () => {
+    const f = flight('c1', 'B', 'round', { fare: { 'adult-1': 1, 'adult-2': 1 } });
+    const s = run(fresh(), { type: 'addFlight', flight: f }, { type: 'setGroupBEnabled', enabled: false });
+    expect(inclusionList(s).notIncluded.map((i) => i.text)).toContain('טיסות – עדיין לא נבדקו');
+  });
+
+  it('a shared hotel picked by one group only says so (amounts are not changed)', () => {
+    const { state } = fullScenario();
+    const b = computePlan(state, 'c1', 'B');
+    expect(b.lines.hotel.amount).toBe(300);
+    expect(hasNotice(b, 'sharedHotel')).toBe(true);
+  });
+
+  it('shared transport rows while B is off are flagged for group A', () => {
+    const s = run(fresh(), { type: 'addItem', item: item('c1', 'transport', 'both', { amount: 80 }) }, { type: 'setGroupBEnabled', enabled: false });
+    const a = computePlan(s, 'c1', 'A');
+    expect(a.lines.transport.amount).toBe(40);
+    expect(hasNotice(a, 'sharedItems')).toBe(true);
   });
 });

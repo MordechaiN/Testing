@@ -6,8 +6,7 @@ import {
   comparisonSentence,
   computePlan,
   cruiseNights,
-  flightCost,
-  flightHasPrice,
+  cheapestItinerary,
   flightsFor,
   LINE_KEYS,
   LINE_LABEL,
@@ -15,7 +14,7 @@ import {
 } from '../domain/calc';
 import type { DateComparison } from '../domain/calc';
 import { dateName, rangeLabel, rangeLabelLong } from '../domain/dates';
-import { DIRECTION_LABEL, flightDetails, flightLabel, GROUP_LABEL, GROUP_SHORT, usd, usdText } from '../domain/format';
+import { DIRECTION_LABEL, flightDetails, flightLabel, flightPriceText, GROUP_LABEL, GROUP_SHORT, usd, usdText } from '../domain/format';
 import type { CSSProperties } from 'react';
 import type { AppState, Cruise, GroupId } from '../domain/types';
 import { Chip, LineValue, NoticeList, StatusBadge, Usd } from './common';
@@ -78,13 +77,18 @@ function Verdict({ cmp }: { cmp: DateComparison }) {
           <Chip tone="yellow">🟡 השוואה חלקית</Chip> <span className="muted">לפי מה שהוזן עד עכשיו: {sentence} (לא סופי)</span>
         </summary>
         <ul className="plain-list small">
-          {cmp.reasons.map((r) => (
-            <li key={r}>{r}</li>
+          {cmp.reasons.map((r, i) => (
+            <li key={i}>{r}</li>
           ))}
         </ul>
       </details>
     </div>
   );
+}
+
+/** Green "cheapest" marks only when the comparison is complete and the dates really differ. */
+function isFinalCheapest(cmp: DateComparison, i: number): boolean {
+  return !cmp.partial && cmp.cheapestIndex === i && (cmp.gap ?? 0) > 0;
 }
 
 function GroupAnswer({ group }: { group: GroupId }) {
@@ -95,7 +99,7 @@ function GroupAnswer({ group }: { group: GroupId }) {
       <h3>{GROUP_LABEL[group]}</h3>
       <div className="answer-totals">
         {cmp.columns.map((c, i) => (
-          <div key={c.cruise.id} className={`answer-total ${cmp.cheapestIndex === i ? 'is-cheapest' : ''}`}>
+          <div key={c.cruise.id} className={`answer-total ${isFinalCheapest(cmp, i) ? 'is-cheapest' : ''}`}>
             <div className="answer-date">{rangeLabel(c.cruise.start, c.cruise.end)}</div>
             {c.result ? (
               <>
@@ -116,19 +120,12 @@ function GroupAnswer({ group }: { group: GroupId }) {
 }
 
 function cheapestFlightText(state: AppState, cruiseId: string, group: GroupId): string | null {
-  const pax = state.passengers[group];
-  const pick = (slot: 'out' | 'back') => {
-    const priced = flightsFor(state, cruiseId, group, slot).filter(flightHasPrice);
-    if (priced.length === 0) return null;
-    return priced.reduce((best, f) => (flightCost(f, pax).total < flightCost(best, pax).total ? f : best));
-  };
-  const out = pick('out');
-  const back = pick('back');
-  if (!out && !back) return null;
-  const part = (label: string, f: typeof out) => (f ? `${label}: ${flightLabel(f)} (${usd(flightCost(f, pax).total)})` : `${label}: —`);
-  return [part(out?.direction === 'round' ? 'הלוך-חזור' : 'הלוך', out), out?.direction === 'round' ? null : part('חזור', back)]
-    .filter(Boolean)
-    .join(' · ');
+  const it = cheapestItinerary(state, cruiseId, group);
+  if (!it) return null;
+  const names = it.legs.map((f) => `${f.direction === 'round' ? 'הלוך-חזור ' : ''}${flightLabel(f)}`).join(' + ');
+  const extras = it.seats + it.baggage > 0 ? ` + מושבים ${usd(it.seats)} + מזוודות ${usd(it.baggage)}` : '';
+  const only = it.oneWayOnly ? ` (רק ${it.legs[0]!.direction === 'back' ? 'חזור' : 'הלוך'} – הכיוון השני חסר)` : '';
+  return `${names}: ${usd(it.total)} (טיסות ${usd(it.fare)}${extras})${only}`;
 }
 
 function QuickAnswer() {
@@ -260,7 +257,7 @@ function FlightPicker({ cruise, group, slot }: { cruise: Cruise; group: GroupId;
       {options.map((f) => (
         <option key={f.id} value={f.id}>
           {f.direction === 'round' ? `${DIRECTION_LABEL.round}: ` : ''}
-          {flightLabel(f)} · {usd(flightCost(f, state.passengers[group]).total)}
+          {flightLabel(f)} · {flightPriceText(f, state.passengers[group])}
         </option>
       ))}
     </select>
@@ -332,8 +329,9 @@ function GroupTable({ group }: { group: GroupId }) {
                     </div>
                   )}
                   {[results[i]!.out, results[i]!.back].filter(Boolean).map((f) => (
-                    <div key={f!.id} className="muted small">
-                      {flightDetails(f!)}
+                    <div key={f!.id} className="muted small flight-chosen">
+                      {DIRECTION_LABEL[f!.direction]}: {flightLabel(f!)}
+                      {flightDetails(f!) && <> · {flightDetails(f!)}</>}
                     </div>
                   ))}
                 </td>
@@ -354,7 +352,7 @@ function GroupTable({ group }: { group: GroupId }) {
             <tr className="row-total">
               <th scope="row">סה״כ</th>
               {results.map((r, i) => {
-                const isMin = cmp.cheapestIndex === i && cmp.columns[i]!.basis === 'selected';
+                const isMin = isFinalCheapest(cmp, i) && cmp.columns[i]!.basis === 'selected';
                 const cheap = cmp.columns[i]!.basis === 'cheapest' ? cmp.columns[i]!.result : null;
                 return (
                   <td key={r.cruiseId} className={isMin ? 'is-min' : ''}>

@@ -8,15 +8,17 @@ import {
   hotelCost,
   hotelIssues,
   hotelNights,
+  hotelHasPrice,
   hotelServesGroup,
   hotelShare,
+  isFilled,
   LINE_KEYS,
   LINE_LABEL,
   passengerSlots,
   tipsPeople,
 } from '../domain/calc';
 import { rangeLabel } from '../domain/dates';
-import { DIRECTION_LABEL, flightDetails, flightLabel, GROUP_LABEL, GROUP_SHORT, OWNER_LABEL, usd } from '../domain/format';
+import { DIRECTION_LABEL, flightDetails, flightLabel, flightPriceText, GROUP_LABEL, GROUP_SHORT, OWNER_LABEL, usd } from '../domain/format';
 import type { PriceRow } from '../domain/reducer';
 import { emptyFlight, emptyHotel, emptyItem, uid } from '../domain/seed';
 import type { Cruise, ExtraItem, Flight, FlightDirection, GroupId, Hotel, ItemCategory, Owner, Plan } from '../domain/types';
@@ -65,7 +67,7 @@ function GroupForm({ cruise, group, cards }: { cruise: Cruise; group: GroupId; c
           {options.map((f) => (
             <option key={f.id} value={f.id}>
               {f.direction === 'round' ? 'הלוך-חזור: ' : ''}
-              {flightLabel(f)} · {usd(flightCost(f, pax).total)}
+              {flightLabel(f)} · {flightPriceText(f, pax)}
             </option>
           ))}
         </select>
@@ -130,7 +132,7 @@ function GroupForm({ cruise, group, cards }: { cruise: Cruise; group: GroupId; c
               {hotels.map((h) => (
                 <option key={h.id} value={h.id}>
                   {h.name || 'מלון (ללא שם)'} · {h.owner === 'both' ? 'משותף, ' : ''}
-                  {usd(hotelShare(h, group).amount)}
+                  {hotelHasPrice(h) ? usd(hotelShare(h, group).amount) : 'חסר מחיר'}
                 </option>
               ))}
             </select>
@@ -160,7 +162,8 @@ function GroupForm({ cruise, group, cards }: { cruise: Cruise; group: GroupId; c
                   min={0}
                   step={1}
                   aria-label="מספר אנשים לטיפים"
-                  value={tipsCount}
+                  value={plan.tipsPeople ?? ''}
+                  placeholder={String(tipsCount)}
                   onChange={(e) => patch({ tipsPeople: e.target.value === '' ? null : Math.max(0, Math.floor(Number(e.target.value))) })}
                 />
                 אנשים
@@ -244,20 +247,28 @@ function FlightCard({ flight, cards }: { flight: Flight; cards: Cards }) {
         </div>
         <div className="card-actions">
           <span className="mini-cost">
-            סה״כ <Usd value={cost.total} />
+            {cost.fareEntered ? (
+              <>
+                סה״כ <Usd value={cost.total} />
+              </>
+            ) : (
+              <NotEntered text="חסר מחיר" />
+            )}
           </span>
           <button className="btn" onClick={() => cards.toggle(flight.id)} aria-expanded={isOpen}>
             {isOpen ? 'סגור' : 'ערוך'}
           </button>
-          <button
-            className="btn"
-            onClick={() => {
-              const newId = uid('f');
-              dispatch({ type: 'copyFlight', id: flight.id, newId, group: other });
-            }}
-          >
-            העתק ל{GROUP_LABEL[other]}
-          </button>
+          {state.groupBEnabled && (
+            <button
+              className="btn"
+              onClick={() => {
+                const newId = uid('f');
+                dispatch({ type: 'copyFlight', id: flight.id, newId, group: other });
+              }}
+            >
+              העתק ל{GROUP_LABEL[other]}
+            </button>
+          )}
           <button
             className="btn btn-danger"
             onClick={() => {
@@ -337,7 +348,11 @@ function FlightCard({ flight, cards }: { flight: Flight; cards: Cards }) {
                       </td>
                     ))}
                     <td className="row-sum">
-                      <Usd value={key === 'fare' ? cost.fare : key === 'seat' ? cost.seats : cost.baggage} />
+                      {slots.some((s) => isFilled(flight[key][s.id])) ? (
+                        <Usd value={key === 'fare' ? cost.fare : key === 'seat' ? cost.seats : cost.baggage} />
+                      ) : (
+                        <NotEntered text="—" />
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -423,7 +438,13 @@ function HotelCard({ hotel, cruise, cards }: { hotel: Hotel; cruise: Cruise; car
         </div>
         <div className="card-actions">
           <span className="mini-cost">
-            סה״כ <Usd value={hotelCost(hotel)} />
+            {hotelHasPrice(hotel) ? (
+              <>
+                סה״כ <Usd value={hotelCost(hotel)} />
+              </>
+            ) : (
+              <NotEntered text="חסר מחיר" />
+            )}
           </span>
           <button className="btn" onClick={() => cards.toggle(hotel.id)} aria-expanded={isOpen}>
             {isOpen ? 'סגור' : 'ערוך'}
@@ -490,7 +511,13 @@ function HotelCard({ hotel, cruise, cards }: { hotel: Hotel; cruise: Cruise; car
             {hotel.owner === 'both' && !shareA.problem && (
               <>
                 {' '}
-                · קבוצה A: <Usd value={shareA.amount} /> · קבוצה B: <Usd value={shareB.amount} />
+                · קבוצה A: <Usd value={shareA.amount} />
+                {state.groupBEnabled && (
+                  <>
+                    {' '}
+                    · קבוצה B: <Usd value={shareB.amount} />
+                  </>
+                )}
               </>
             )}
             <div className="muted small">כל הסכומים בדולרים. מחיר ביורו – המירו לפני ההזנה.</div>
@@ -594,14 +621,14 @@ function ItemsSection({ cruise }: { cruise: Cruise }) {
 // ---------- agent prices (rooms) ----------
 
 function RoomsSection({ cruise }: { cruise: Cruise }) {
-  const { dispatch } = useApp();
+  const { state, dispatch } = useApp();
   return (
     <details className="section details-box">
       <summary>
         <h2 className="inline">מחירי הסוכן – חדרים (עריכה)</h2>
       </summary>
       <p className="muted">מחירי קרוז בלבד, כולל מיסים, כפי שנמסרו. סוג החדר והמחיר נפרדים – אין הנחה שחדר יקר יותר הוא טוב יותר.</p>
-      {GROUPS.map((g) => (
+      {activeGroups(state).map((g) => (
         <div key={g} className="rooms-group">
           <h3>{GROUP_LABEL[g]}</h3>
           {cruise.rooms[g].map((r) => (

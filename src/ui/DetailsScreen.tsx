@@ -1,10 +1,9 @@
 import { useRef, useState } from 'react';
-import { inclusionList } from '../domain/calc';
+import { activeGroups, inclusionList } from '../domain/calc';
 import { addDays, longDate, ltr, rangeLabelLong } from '../domain/dates';
 import { GROUP_LABEL } from '../domain/format';
 import { exportJson, importJson } from '../domain/storage';
 import type { TermStatus } from '../domain/types';
-import { GROUPS } from '../domain/types';
 import { Chip, NumField, Section } from './common';
 import type { Tone } from './common';
 import { useApp } from './context';
@@ -60,7 +59,7 @@ function DepositAndCancel() {
         </div>
       </div>
       <div className="form-grid">
-        {GROUPS.map((g) => (
+        {activeGroups(state).map((g) => (
           <NumField
             key={g}
             label={`מקדמה בפועל – ${GROUP_LABEL[g]}`}
@@ -158,8 +157,9 @@ function Passengers() {
   const { state, dispatch } = useApp();
   return (
     <Section title="נוסעים בכל קבוצה" hint="לכל נוסע עמודת מחיר משלו בטיסות. תינוק משלם רק אם מזינים לו מחיר.">
+      {!state.groupBEnabled && <p className="muted small">🔵 קבוצה B מוסתרת (לא מצטרפת). הנתונים שלה שמורים.</p>}
       <div className="form-grid">
-        {GROUPS.map((g) => (
+        {activeGroups(state).map((g) => (
           <div key={g} className="card">
             <h3>{GROUP_LABEL[g]}</h3>
             <div className="form-grid">

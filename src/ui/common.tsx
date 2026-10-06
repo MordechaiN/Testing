@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import type { Line, Notice, PlanStatus } from '../domain/calc';
+import { longDate } from '../domain/dates';
 import { usd } from '../domain/format';
 import type { Money } from '../domain/types';
 
@@ -154,6 +155,12 @@ export function TextField({ label, value, onChange, type = 'text', placeholder, 
         dir={type === 'text' ? 'auto' : 'ltr'}
         onChange={(e) => onChange(e.target.value)}
       />
+      {/* Browsers may show a date field as mm/dd/yyyy – always repeat it as dd/mm/yyyy. */}
+      {type === 'date' && longDate(value) && (
+        <span className="field-hint" dir="ltr">
+          {longDate(value)}
+        </span>
+      )}
     </label>
   );
 }

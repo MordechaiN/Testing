@@ -1,5 +1,6 @@
 import { ltr, shortDate } from './dates';
-import type { Flight, GroupId, Owner } from './types';
+import type { Flight, GroupId, Owner, Passengers } from './types';
+import { flightCost } from './calc';
 
 /** 4805 -> "4,805", 1234.5 -> "1,234.50" */
 export function fmt(n: number): string {
@@ -58,4 +59,11 @@ export function flightDetails(f: Flight): string {
   const route = f.fromAirport && f.toAirport ? `${f.fromAirport}→${f.toAirport}` : f.fromAirport || f.toAirport;
   const parts = [shortDate(f.date), times, route, stopsLabel(f.stops), f.duration].filter(Boolean);
   return parts.length ? ltr(parts.join(' · ')) : '';
+}
+
+/** Price shown next to a flight option: the fare only (seats/baggage are separate lines), or "חסר מחיר". */
+export function flightPriceText(f: Flight, pax: Passengers): string {
+  const c = flightCost(f, pax);
+  if (!c.fareEntered) return 'חסר מחיר';
+  return `טיסה ${usd(c.fare)}${c.missingAdultFare.length > 0 ? ' (חלקי)' : ''}`;
 }

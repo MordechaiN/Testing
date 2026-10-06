@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useReducer, useState } from 'react';
 import { reducer } from './domain/reducer';
-import { loadState, saveState } from './domain/storage';
+import { loadState, saveState, STORAGE_KEY } from './domain/storage';
 import { DetailsScreen } from './ui/DetailsScreen';
 import { EntryScreen } from './ui/EntryScreen';
 import { SummaryScreen } from './ui/SummaryScreen';
@@ -20,6 +20,15 @@ export function App() {
 
   // Autosave on every change.
   useEffect(() => setSaved(saveState(state)), [state]);
+
+  // Another tab saved newer data: take it, so this tab never overwrites it with stale data.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === STORAGE_KEY && e.newValue) dispatch({ type: 'replaceAll', state: loadState() });
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
   useEffect(() => window.scrollTo?.({ top: 0 }), [screen]);
 
   const ctx = useMemo(() => ({ state, dispatch, go: setScreen }), [state]);

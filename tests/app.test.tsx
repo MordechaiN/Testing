@@ -250,3 +250,75 @@ describe('details screen', () => {
     vi.restoreAllMocks();
   });
 });
+
+describe('review fixes (UI)', () => {
+  it('no green "cheapest" tag while the comparison is partial', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const a = region(/^קבוצה A – זוג \+ תינוק$/);
+    const radios = within(a).getAllByRole('radio');
+    await user.click(radios[0]!);
+    await user.click(radios[4]!);
+    expect(within(a).queryByText('הזול מבין התאריכים')).toBeNull();
+    expect(a.querySelector('.is-min')).toBeNull();
+    expect(within(a).getAllByText(/השוואה חלקית/).length).toBeGreaterThan(0);
+  });
+
+  it('a new flight option says "missing price", never "$0"', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(nav('הזנת נתונים'));
+    const aSection = region(/הזנה – קבוצה A/);
+    await user.click(within(aSection).getByRole('button', { name: '+ טיסת הלוך' }));
+    const select = within(groupCard('A')).getByLabelText(/^טיסת הלוך – זוג \+ תינוק/) as HTMLSelectElement;
+    const options = Array.from(select.options).map((o) => o.textContent ?? '');
+    expect(options.some((t) => t.includes('חסר מחיר'))).toBe(true);
+    expect(options.some((t) => t.includes('$0'))).toBe(false);
+    expect(within(aSection.querySelector('.flight-card') as HTMLElement).getByText('חסר מחיר')).toBeTruthy();
+  });
+
+  it('the tips "number of people" field can be cleared and retyped', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(nav('הזנת נתונים'));
+    const form = groupCard('A');
+    await user.type(within(form).getByLabelText(/^טיפים – זוג \+ תינוק/), '20');
+    await user.selectOptions(within(form).getByLabelText('איך הוזנו הטיפים'), 'person');
+    const people = within(form).getByLabelText('מספר אנשים לטיפים') as HTMLInputElement;
+    expect(people.value).toBe('');
+    expect(people.placeholder).toBe('2');
+    await user.type(people, '3');
+    expect(people.value).toBe('3');
+    expect(strip(form.querySelector('.total-lines')!.textContent)).toContain('טיפים לצוות: $60');
+    await user.clear(people);
+    await user.type(people, '2');
+    expect(strip(form.querySelector('.total-lines')!.textContent)).toContain('טיפים לצוות: $40');
+  });
+
+  it('with B off, the details screen shows no B deposit or passengers', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: /לא – רק קבוצה A/ }));
+    await user.click(nav('פרטים ותנאים'));
+    expect(screen.getAllByLabelText(/מקדמה בפועל/)).toHaveLength(1);
+    expect(screen.queryByText('קבוצה B – זוג')).toBeNull();
+  });
+
+  it('a change saved by another tab is picked up instead of being overwritten', async () => {
+    render(<App />);
+    const other = fullScenario().state;
+    localStorage.setItem('cruise-compare-v1', JSON.stringify(other));
+    window.dispatchEvent(new StorageEvent('storage', { key: 'cruise-compare-v1', newValue: JSON.stringify(other) }));
+    const totalA = await screen.findAllByText('$7,392');
+    expect(totalA.length).toBeGreaterThan(0);
+  });
+
+  it('date fields repeat the date as dd/mm/yyyy', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(nav('הזנת נתונים'));
+    const head = document.querySelector('.cruise-head') as HTMLElement;
+    expect(within(head).getByText('05/09/2027')).toBeTruthy();
+    expect(within(head).getByText('12/09/2027')).toBeTruthy();
+  });
+});

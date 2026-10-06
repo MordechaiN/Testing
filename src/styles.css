@@ -942,6 +942,13 @@ textarea.notes {
   .price-grid td {
     min-width: 76px;
   }
+  .flight-pick {
+    flex-wrap: wrap;
+    gap: 2px;
+  }
+  .flight-pick select {
+    flex-basis: 100%;
+  }
   .price-grid .row-sum {
     display: none;
   }
