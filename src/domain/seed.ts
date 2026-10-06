@@ -1,9 +1,11 @@
 import { addDays } from './dates';
+import { FARE_ORDER, FARE_RULES, fareTermsText } from './fares';
 import type {
   AppState,
   Cruise,
   ExtraItem,
   Flight,
+  FareClass,
   FlightDirection,
   GroupId,
   Hotel,
@@ -39,7 +41,7 @@ export function emptyPlan(): Plan {
   };
 }
 
-export function emptyFlight(cruiseId: string, group: GroupId, direction: FlightDirection): Flight {
+export function emptyFlight(cruiseId: string, group: Owner, direction: FlightDirection): Flight {
   return {
     id: uid('f'),
     cruiseId,
@@ -76,6 +78,20 @@ export function emptyFlight(cruiseId: string, group: GroupId, direction: FlightD
     verified: true,
     benchmark: false,
     notes: '',
+    fareClass: '',
+    searchedFor: '',
+    displayedOut: null,
+    displayedBack: null,
+    adultFare: null,
+    carrierSurcharge: null,
+    adultTaxes: null,
+    babyFare: null,
+    babyTaxes: null,
+    priceMode: 'unverified',
+    verifiedTotal: { all: null, A: null, B: null },
+    extraSeat: { A: null, B: null },
+    extraBaggage: { A: null, B: null },
+    history: [],
   };
 }
 
@@ -220,7 +236,7 @@ export function initialState(): AppState {
   const plans: AppState['plans'] = {};
   for (const c of cruises) plans[c.id] = plansFor();
   return {
-    version: 3,
+    version: 4,
     groupBEnabled: true,
     passengers: {
       A: { adults: 2, infants: 1 },
@@ -235,7 +251,7 @@ export function initialState(): AppState {
     deposit: { A: null, B: null },
     terms: initialTerms(),
     notes: '',
-    seeds: { elAlBenchmark: false },
+    seeds: { elAlBenchmark: false, elAlFares: false },
   };
 }
 
@@ -300,18 +316,107 @@ export function elAlBenchmarkB(): Flight {
   };
 }
 
-/** Adds the user's EL AL cart once. If the user deletes it later it is not added again. */
-export function applySeeds(state: AppState): AppState {
-  if (state.seeds.elAlBenchmark) return state;
-  const cruise = state.cruises.find((c) => c.id === 'c1');
-  const seeded: AppState = { ...state, seeds: { ...state.seeds, elAlBenchmark: true } };
-  if (!cruise || cruise.start !== '2027-09-05' || state.flights.some((f) => f.id.startsWith('bench-elal'))) return seeded;
-  const planA = state.plans.c1?.A;
+// ---------- the six EL AL fares checked by the user (4 adults + 1 baby) ----------
+
+interface FareSource {
+  cruiseId: 'c1' | 'c2';
+  fareClass: Exclude<FareClass, ''>;
+  displayedOut: number;
+  displayedBack: number;
+  adultFare: number;
+  babyFare: number;
+}
+
+/** Exactly as supplied. Carrier surcharge 120, adult taxes 69.88 and baby taxes 32.20 are the same in all six. */
+const FARE_SOURCES: FareSource[] = [
+  { cruiseId: 'c1', fareClass: 'lite', displayedOut: 262, displayedBack: 178, adultFare: 249, babyFare: 50 },
+  { cruiseId: 'c2', fareClass: 'lite', displayedOut: 192, displayedBack: 178, adultFare: 369, babyFare: 74 },
+  { cruiseId: 'c1', fareClass: 'classic', displayedOut: 322, displayedBack: 238, adultFare: 369, babyFare: 74 },
+  { cruiseId: 'c2', fareClass: 'classic', displayedOut: 252, displayedBack: 238, adultFare: 299, babyFare: 60 },
+  { cruiseId: 'c1', fareClass: 'flex', displayedOut: 372, displayedBack: 288, adultFare: 469, babyFare: 94 },
+  { cruiseId: 'c2', fareClass: 'flex', displayedOut: 302, displayedBack: 288, adultFare: 399, babyFare: 80 },
+];
+
+export const ELAL_SEARCH = '4 מבוגרים + תינוק (A: 2 מבוגרים + תינוק, B: 2 מבוגרים)';
+
+export function elAlFareId(cruiseId: string, fareClass: string): string {
+  return `elal-${cruiseId}-${fareClass}`;
+}
+
+/** One round-trip fare record, shared by both groups. Nothing that was not supplied is filled in. */
+function elAlFare(src: FareSource): Flight {
+  const c1 = src.cruiseId === 'c1';
+  const terms = fareTermsText(src.fareClass);
   return {
-    ...seeded,
-    flights: [...state.flights, elAlBenchmarkA(), elAlBenchmarkB()],
-    plans: planA && !planA.outFlightId ? { ...state.plans, c1: { ...state.plans.c1!, A: { ...planA, outFlightId: 'bench-elal-A' } } } : state.plans,
+    ...emptyFlight(src.cruiseId, 'both', 'round'),
+    id: elAlFareId(src.cruiseId, src.fareClass),
+    airline: 'EL AL',
+    date: c1 ? '2027-09-03' : '2027-09-17',
+    depTime: c1 ? '14:25' : '14:10',
+    // 18:05 was supplied for the 03/09 flight only; the other arrival time was not supplied.
+    arrTime: c1 ? '18:05' : '',
+    fromAirport: 'TLV',
+    toAirport: 'BCN',
+    stops: 0,
+    returnDate: c1 ? '2027-09-13' : '2027-09-27',
+    returnDepTime: '22:35',
+    returnStops: 0,
+    fareType: FARE_RULES[src.fareClass].label,
+    fareClass: src.fareClass,
+    searchedFor: ELAL_SEARCH,
+    displayedOut: src.displayedOut,
+    displayedBack: src.displayedBack,
+    adultFare: src.adultFare,
+    carrierSurcharge: 120,
+    adultTaxes: 69.88,
+    babyFare: src.babyFare,
+    babyTaxes: 32.2,
+    priceMode: 'unverified',
+    baggageInfo: FARE_RULES[src.fareClass].baggage,
+    changeTerms: terms.change,
+    cancelTerms: terms.cancel,
+    source: 'EL AL (נבדק על ידי המשתמש)',
+    notes:
+      'הנתונים הוזנו כפי שנמסרו. לא הוזנו: מספרי טיסה, תאריך הבדיקה' +
+      (c1 ? ', שעת נחיתה בחזור.' : ', שעות נחיתה.'),
   };
+}
+
+export function elAlFares(): Flight[] {
+  return FARE_ORDER.flatMap((cls) => FARE_SOURCES.filter((s) => s.fareClass === cls).map(elAlFare));
+}
+
+/**
+ * Adds the user's data once: the EL AL cart (round 2) and the six EL AL fares (round 3).
+ * If the user deletes them later they are not added again.
+ */
+export function applySeeds(state: AppState): AppState {
+  let next = state;
+  if (!next.seeds.elAlBenchmark) {
+    const cruise = next.cruises.find((c) => c.id === 'c1');
+    next = { ...next, seeds: { ...next.seeds, elAlBenchmark: true } };
+    if (cruise && cruise.start === '2027-09-05' && !state.flights.some((f) => f.id.startsWith('bench-elal'))) {
+      const planA = state.plans.c1?.A;
+      next = {
+        ...next,
+        flights: [...next.flights, elAlBenchmarkA(), elAlBenchmarkB()],
+        plans:
+          planA && !planA.outFlightId
+            ? { ...next.plans, c1: { ...next.plans.c1!, A: { ...planA, outFlightId: 'bench-elal-A' } } }
+            : next.plans,
+      };
+    }
+  }
+  if (!next.seeds.elAlFares) {
+    const known = new Set(next.flights.map((f) => f.id));
+    const cruiseOk = (id: string, start: string) => next.cruises.some((c) => c.id === id && c.start === start);
+    const add = elAlFares().filter(
+      (f) =>
+        !known.has(f.id) && cruiseOk(f.cruiseId, f.cruiseId === 'c1' ? '2027-09-05' : '2027-09-19'),
+    );
+    next = { ...next, flights: [...next.flights, ...add], seeds: { ...next.seeds, elAlFares: true } };
+  }
+  return next;
 }
 
 /** What a new user (or a reset) starts with: base data + the EL AL cart. */
@@ -323,9 +428,16 @@ export function freshState(): AppState {
  * A new hotel for a cruise date, with the planned dates pre-filled (2 nights before / after the cruise).
  * These are plan dates the user can change – no price is ever pre-filled.
  */
-export function newHotelFor(cruise: Cruise | undefined, owner: Owner, phase: HotelPhase): Hotel {
+export function newHotelFor(
+  cruise: Cruise | undefined,
+  owner: Owner,
+  phase: HotelPhase,
+  /** Dates derived from the selected flight (see plannedStay) – used instead of the 2-night default. */
+  stay?: { checkIn: string; checkOut: string } | null,
+): Hotel {
   const h = emptyHotel(cruise?.id ?? '', owner, phase);
   if (!cruise) return h;
+  if (stay) return { ...h, checkIn: stay.checkIn, checkOut: stay.checkOut };
   if (phase === 'before') {
     const from = addDays(cruise.start, -2);
     if (from) return { ...h, checkIn: from, checkOut: cruise.start };

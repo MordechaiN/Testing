@@ -37,11 +37,51 @@ export type FlightDirection = 'out' | 'back' | 'round';
 /** Price per passenger slot id (see PassengerSlot). Missing key or null = not entered. */
 export type PersonPrices = Record<string, Money>;
 
-/** A flight option belongs to ONE group, so prices are entered per person of that group. */
+/** EL AL fare type. '' = a regular flight option (not a fare record). */
+export type FareClass = '' | 'lite' | 'classic' | 'flex';
+
+/**
+ * Which price counts for a fare record:
+ * 'unverified' – nothing is counted (default while the displayed price and the breakdown contradict),
+ * 'total' – the verified total the user typed (per group),
+ * 'breakdown' – A = 2 × adult + baby, B = 2 × adult, from the per-passenger breakdown.
+ */
+export type PriceMode = 'unverified' | 'total' | 'breakdown';
+
+/** The price figures of one check, kept so an old check is never lost when a new one is entered. */
+export interface FareSnapshot {
+  displayedOut: Money;
+  displayedBack: Money;
+  adultFare: Money;
+  carrierSurcharge: Money;
+  adultTaxes: Money;
+  babyFare: Money;
+  babyTaxes: Money;
+}
+
+/** "בדיקה קודמת": a snapshot kept when a newer check replaced the figures. */
+export interface FareCheck extends FareSnapshot {
+  id: string;
+  checkedAt: string;
+  source: string;
+  note: string;
+}
+
+/** Verified totals typed by the user. 'all' = the whole party (4 adults + baby); A / B = one group. */
+export interface VerifiedTotals {
+  all: Money;
+  A: Money;
+  B: Money;
+}
+
+/**
+ * A flight option. Regular options belong to ONE group (prices per person of that group).
+ * A fare record (fareClass != '') is shared by both groups (group 'both'): its price is derived per group.
+ */
 export interface Flight {
   id: string;
   cruiseId: string;
-  group: GroupId;
+  group: Owner;
   direction: FlightDirection;
   airline: string;
   flightNo: string;
@@ -81,8 +121,28 @@ export interface Flight {
   sourceUrl: string;
   /** ISO date the price was looked at. A checked price is not a guaranteed price. */
   checkedAt: string;
-  /** false = price could not be verified; it is shown but never used as a firm offer. */
+  /** false = price could not be verified; it is shown but never used as a firm offer. (Regular options.) */
   verified: boolean;
+  // ----- fare records (EL AL Lite / Classic / Flex) -----
+  fareClass: FareClass;
+  /** Who the airline was asked about, e.g. "4 מבוגרים + תינוק". */
+  searchedFor: string;
+  /** Price shown next to each leg, exactly as typed by the user. Never added to the breakdown. */
+  displayedOut: Money;
+  displayedBack: Money;
+  /** Per-passenger breakdown. Adult = fare + surcharge + taxes, baby = fare + taxes. */
+  adultFare: Money;
+  carrierSurcharge: Money;
+  adultTaxes: Money;
+  babyFare: Money;
+  babyTaxes: Money;
+  priceMode: PriceMode;
+  verifiedTotal: VerifiedTotals;
+  /** Extra seat / bag bought separately (total for the group). Ignored when the fare includes it. */
+  extraSeat: Record<GroupId, Money>;
+  extraBaggage: Record<GroupId, Money>;
+  /** Earlier checks, oldest first. The figures above are the newest check. */
+  history: FareCheck[];
   /** Reference offer the other options are compared against. */
   benchmark: boolean;
   notes: string;
@@ -175,10 +235,10 @@ export interface Term {
   note: string;
 }
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export interface AppState {
-  version: 3;
+  version: 4;
   /** When false, group B is hidden everywhere and never calculated into anything. */
   groupBEnabled: boolean;
   passengers: Record<GroupId, Passengers>;
@@ -195,5 +255,5 @@ export interface AppState {
   terms: Term[];
   notes: string;
   /** Built-in example data that was already added once (so deleting it is respected). */
-  seeds: { elAlBenchmark: boolean };
+  seeds: { elAlBenchmark: boolean; elAlFares: boolean };
 }

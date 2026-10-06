@@ -1,4 +1,4 @@
-import { flightFitsSlot, hotelServesGroup } from './calc';
+import { flightFitsSlot, flightServesGroup, hotelServesGroup } from './calc';
 import { freshState, plansFor, uid } from './seed';
 import type {
   AppState,
@@ -12,10 +12,20 @@ import type {
   Plan,
   Room,
   Term,
+  VerifiedTotals,
 } from './types';
 import { GROUPS } from './types';
 
 export type PriceRow = 'fare' | 'seat' | 'baggage';
+
+export type FarePriceField =
+  | 'displayedOut'
+  | 'displayedBack'
+  | 'adultFare'
+  | 'carrierSurcharge'
+  | 'adultTaxes'
+  | 'babyFare'
+  | 'babyTaxes';
 
 export type Action =
   | { type: 'setGroupBEnabled'; enabled: boolean }
@@ -33,6 +43,11 @@ export type Action =
   | { type: 'setFlightPrice'; id: string; row: PriceRow; slotId: string; value: Money }
   | { type: 'copyFlight'; id: string; newId: string; group: GroupId }
   | { type: 'removeFlight'; id: string }
+  | { type: 'setFarePrice'; id: string; field: FarePriceField; value: Money }
+  | { type: 'setVerifiedTotal'; id: string; key: keyof VerifiedTotals; value: Money }
+  | { type: 'setFareExtra'; id: string; row: 'seat' | 'baggage'; group: GroupId; value: Money }
+  | { type: 'archiveFareCheck'; id: string; checkId: string }
+  | { type: 'selectFare'; cruiseId: string; flightId: string }
   | { type: 'addHotel'; hotel: Hotel }
   | { type: 'updateHotel'; id: string; patch: Partial<Omit<Hotel, 'id' | 'cruiseId'>> }
   | { type: 'removeHotel'; id: string }
@@ -68,7 +83,7 @@ function clearInvalidFlightRefs(state: AppState): AppState {
   return mapAllPlans(state, (p, cruiseId, group) => {
     const ok = (id: string | null, slot: 'out' | 'back') =>
       id !== null &&
-      state.flights.some((f) => f.id === id && f.cruiseId === cruiseId && f.group === group && flightFitsSlot(f, slot));
+      state.flights.some((f) => f.id === id && f.cruiseId === cruiseId && flightServesGroup(f, group) && flightFitsSlot(f, slot));
     const outFlightId = ok(p.outFlightId, 'out') ? p.outFlightId : null;
     const backFlightId = ok(p.backFlightId, 'back') ? p.backFlightId : null;
     return outFlightId === p.outFlightId && backFlightId === p.backFlightId ? p : { ...p, outFlightId, backFlightId };
@@ -195,6 +210,73 @@ export function reducer(state: AppState, action: Action): AppState {
         baggage: { ...src.baggage },
       };
       return { ...state, flights: [...state.flights, copy] };
+    }
+
+    case 'setFarePrice':
+      return {
+        ...state,
+        flights: state.flights.map((f) => (f.id === action.id ? { ...f, [action.field]: action.value } : f)),
+      };
+
+    case 'setVerifiedTotal':
+      return {
+        ...state,
+        flights: state.flights.map((f) =>
+          f.id === action.id ? { ...f, verifiedTotal: { ...f.verifiedTotal, [action.key]: action.value } } : f,
+        ),
+      };
+
+    case 'setFareExtra': {
+      const key = action.row === 'seat' ? 'extraSeat' : 'extraBaggage';
+      return {
+        ...state,
+        flights: state.flights.map((f) =>
+          f.id === action.id ? { ...f, [key]: { ...f[key], [action.group]: action.value } } : f,
+        ),
+      };
+    }
+
+    // Keeps the current figures as "בדיקה קודמת" so a new check never overwrites the old one.
+    case 'archiveFareCheck':
+      return {
+        ...state,
+        flights: state.flights.map((f) =>
+          f.id === action.id
+            ? {
+                ...f,
+                history: [
+                  ...f.history,
+                  {
+                    id: action.checkId,
+                    checkedAt: f.checkedAt,
+                    source: f.source,
+                    note: f.notes,
+                    displayedOut: f.displayedOut,
+                    displayedBack: f.displayedBack,
+                    adultFare: f.adultFare,
+                    carrierSurcharge: f.carrierSurcharge,
+                    adultTaxes: f.adultTaxes,
+                    babyFare: f.babyFare,
+                    babyTaxes: f.babyTaxes,
+                  },
+                ],
+                // The new check starts unverified, with its own date, until the user decides which price counts.
+                priceMode: 'unverified',
+                checkedAt: '',
+              }
+            : f,
+        ),
+      };
+
+    // One click on the summary: this fare record for BOTH groups of the cruise (each group's plan on its own).
+    case 'selectFare': {
+      const flight = state.flights.find((f) => f.id === action.flightId && f.cruiseId === action.cruiseId);
+      if (!flight) return state;
+      const cruisePlans = state.plans[action.cruiseId];
+      if (!cruisePlans) return state;
+      const plans = { ...cruisePlans };
+      for (const g of GROUPS) plans[g] = { ...plans[g], outFlightId: flight.id, backFlightId: null };
+      return { ...state, plans: { ...state.plans, [action.cruiseId]: plans } };
     }
 
     case 'removeFlight':

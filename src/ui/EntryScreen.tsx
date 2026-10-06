@@ -4,6 +4,7 @@ import {
   computePlan,
   cruiseDatesValid,
   flightCost,
+  flightGroup,
   flightsFor,
   hotelCost,
   hotelIssues,
@@ -14,12 +15,13 @@ import {
   hotelServesGroup,
   hotelShare,
   isFilled,
+  plannedStay,
   LINE_KEYS,
   LINE_LABEL,
   passengerSlots,
   tipsPeople,
 } from '../domain/calc';
-import { rangeLabel } from '../domain/dates';
+import { daysBetween, ltr, rangeLabel, shortDate } from '../domain/dates';
 import { CURRENCY_SYMBOL, DIRECTION_LABEL, flightDetails, hotelNativeText, flightLabel, flightPriceText, GROUP_LABEL, GROUP_SHORT, OWNER_LABEL, usd } from '../domain/format';
 import type { PriceRow } from '../domain/reducer';
 import { emptyFlight, emptyItem, newHotelFor, uid } from '../domain/seed';
@@ -27,10 +29,11 @@ import type { Cruise, Currency, ExtraItem, Flight, FlightDirection, GroupId, Hot
 import { GROUPS } from '../domain/types';
 import { Chip, LineValue, MoneyInput, NotEntered, NoticeList, NumField, Section, TextField, Usd } from './common';
 import { useApp } from './context';
+import { FareSection } from './FaresSection';
 
 // ---------- open/close state of the option cards ----------
 
-interface Cards {
+export interface Cards {
   open: Set<string>;
   toggle: (id: string) => void;
   show: (id: string) => void;
@@ -49,7 +52,7 @@ function GroupForm({ cruise, group, cards }: { cruise: Cruise; group: GroupId; c
     state.hotels.filter((h) => h.cruiseId === cruise.id && hotelServesGroup(h, group) && (h.phase ?? 'before') === phase);
 
   const newHotel = (phase: 'before' | 'after') => {
-    const h = newHotelFor(cruise, group, phase);
+    const h = newHotelFor(cruise, group, phase, plannedStay(state, cruise.id, group, phase));
     dispatch({ type: 'addHotel', hotel: h });
     patch(phase === 'before' ? { hotelId: h.id, noHotel: false } : { hotelAfterId: h.id, noHotelAfter: false });
     cards.show(h.id);
@@ -243,10 +246,11 @@ const PRICE_ROWS: { key: PriceRow; label: string }[] = [
 function FlightCard({ flight, cards }: { flight: Flight; cards: Cards }) {
   const { state, dispatch } = useApp();
   const isOpen = cards.open.has(flight.id);
-  const pax = state.passengers[flight.group];
+  const group = flightGroup(flight);
+  const pax = state.passengers[group];
   const slots = passengerSlots(pax);
   const cost = flightCost(flight, pax);
-  const other: GroupId = flight.group === 'A' ? 'B' : 'A';
+  const other: GroupId = group === 'A' ? 'B' : 'A';
   const set = (patch: Partial<Flight>) => dispatch({ type: 'updateFlight', id: flight.id, patch });
   const round = flight.direction === 'round';
   const details = flightDetails(flight);
@@ -487,6 +491,10 @@ function HotelCard({ hotel, cruise, cards }: { hotel: Hotel; cruise: Cruise; car
   const shareA = hotelShare(hotel, 'A');
   const shareB = hotelShare(hotel, 'B');
   const usedBy = GROUPS.filter((g) => state.plans[cruise.id]?.[g].hotelId === hotel.id || state.plans[cruise.id]?.[g].hotelAfterId === hotel.id);
+  // Dates the flights imply (arrival → cruise start, or cruise end → flight home). Only a suggestion – dates stay editable.
+  const stay = plannedStay(state, cruise.id, hotel.owner, hotel.phase);
+  const stayNights = stay ? daysBetween(stay.checkIn, stay.checkOut) : null;
+  const stayDiffers = !!stay && (stay.checkIn !== hotel.checkIn || stay.checkOut !== hotel.checkOut);
 
   return (
     <div className="card hotel-card" id={`card-${hotel.id}`}>
@@ -571,6 +579,19 @@ function HotelCard({ hotel, cruise, cards }: { hotel: Hotel; cruise: Cruise; car
             </label>
             <TextField label="Check-in" type="date" value={hotel.checkIn} onChange={(v) => set({ checkIn: v })} />
             <TextField label="Check-out" type="date" value={hotel.checkOut} onChange={(v) => set({ checkOut: v })} />
+            {stay && (
+              <div className="field field-wide stay-hint">
+                <span className="field-label">לפי תאריכי הטיסה</span>
+                <span className="readonly">
+                  {ltr(`${shortDate(stay.checkIn)} → ${shortDate(stay.checkOut)}`)} ({stayNights} לילות)
+                </span>
+                {stayDiffers && (
+                  <button className="btn btn-small" onClick={() => set({ checkIn: stay.checkIn, checkOut: stay.checkOut })}>
+                    החל תאריכים מהטיסה
+                  </button>
+                )}
+              </div>
+            )}
             {fromDates ? (
               <div className="field">
                 <span className="field-label">מספר לילות</span>
@@ -641,7 +662,7 @@ function HotelSection({ cruise, cards }: { cruise: Cruise; cards: Cards }) {
         <button
           className="btn"
           onClick={() => {
-            const h = newHotelFor(cruise, 'A', 'before');
+            const h = newHotelFor(cruise, 'A', 'before', plannedStay(state, cruise.id, 'A', 'before'));
             dispatch({ type: 'addHotel', hotel: h });
             cards.show(h.id);
           }}
@@ -651,7 +672,7 @@ function HotelSection({ cruise, cards }: { cruise: Cruise; cards: Cards }) {
         <button
           className="btn"
           onClick={() => {
-            const h = newHotelFor(cruise, 'A', 'after');
+            const h = newHotelFor(cruise, 'A', 'after', plannedStay(state, cruise.id, 'A', 'after'));
             dispatch({ type: 'addHotel', hotel: h });
             cards.show(h.id);
           }}
@@ -889,6 +910,8 @@ export function EntryScreen() {
               </button>
             </div>
           )}
+
+          <FareSection cruise={cruise} cards={cards} />
 
           <HotelSection cruise={cruise} cards={cards} />
           <ItemsSection cruise={cruise} />

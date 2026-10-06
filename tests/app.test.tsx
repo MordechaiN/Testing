@@ -438,3 +438,90 @@ describe('EL AL cart, flight comparison and hotels (UI)', () => {
     expect(within(form).getAllByText('$6,050.96').length).toBeGreaterThan(0); // 4,805 + 915.96 + 330
   });
 });
+
+describe('EL AL fares (UI)', () => {
+  beforeEach(() => localStorage.clear());
+
+  it('the summary shows Option 1 and Option 2 with flight, hotel, cruise and a total for A and for B', () => {
+    render(<App />);
+    const trip = region(/אפשרויות הטיול/);
+    expect(within(trip).getByRole('article', { name: 'אפשרות 1' })).toBeTruthy();
+    const second = within(trip).getByRole('article', { name: 'אפשרות 2' });
+    const text = strip(second.textContent);
+    expect(text).toContain('19/09 → 26/09');
+    expect(text).toContain('17/09 → 27/09');
+    expect(text).toContain('14:10');
+    expect(text).toContain('🏨');
+    expect(text).toContain('🚢');
+    expect(within(second).getByRole('rowheader', { name: /Total/ })).toBeTruthy();
+    expect(within(second).getAllByText('$5,085').length).toBeGreaterThan(0); // A, cheapest room of 19/09
+    expect(within(second).getAllByText('$3,935').length).toBeGreaterThan(0); // B
+  });
+
+  it('the entry screen compares Lite / Classic / Flex and warns that the prices need verification', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(nav('הזנת נתונים'));
+    const table = document.querySelector('.fare-table') as HTMLElement;
+    expect(within(table).getByRole('columnheader', { name: 'Lite' })).toBeTruthy();
+    expect(within(table).getByRole('columnheader', { name: 'Classic' })).toBeTruthy();
+    expect(within(table).getByRole('columnheader', { name: 'Flex' })).toBeTruthy();
+    expect(strip(table.textContent)).toContain('249 + 120 + 69.88 = $438.88');
+    expect(strip(table.textContent)).toContain('$262 / $178');
+    expect(within(table).getAllByText(/נדרש אימות מחיר/).length).toBeGreaterThan(0);
+    expect(document.querySelectorAll('.mismatch-box')).toHaveLength(3);
+  });
+
+  it('choosing a fare in the summary selects it for both groups; unverified fares are not counted', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const trip = region(/אפשרויות הטיול/);
+    const first = within(trip).getByRole('article', { name: 'אפשרות 1' });
+    await user.click(within(first).getByRole('button', { name: /^Classic/ }));
+    expect(within(first).getByRole('button', { name: /^Classic/ }).getAttribute('aria-pressed')).toBe('true');
+    expect(within(first).getAllByText('נדרש אימות מחיר').length).toBe(2); // A and B
+    expect(within(first).getAllByText('$4,805').length).toBeGreaterThan(0); // the cruise only
+  });
+
+  it('"use the calculation by passengers" counts A = 2 adults + baby and B = 2 adults, separately', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(nav('הזנת נתונים'));
+    const card = document.querySelector('#card-elal-c1-lite') as HTMLElement;
+    await user.click(within(card).getByRole('button', { name: 'ערוך' }));
+    await user.click(within(card).getByLabelText('השתמש בחישוב לפי נוסעים'));
+    const costs = strip(card.querySelector('.mini-cost')!.textContent);
+    expect(costs).toContain('$959.96');
+    expect(costs).toContain('$877.76');
+  });
+
+  it('a new check keeps the old one as "בדיקה קודמת"', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(nav('הזנת נתונים'));
+    const card = document.querySelector('#card-elal-c1-lite') as HTMLElement;
+    await user.click(within(card).getByRole('button', { name: 'ערוך' }));
+    await user.click(within(card).getByRole('button', { name: /בדיקה חדשה/ }));
+    expect(within(card).getByText('בדיקה קודמת')).toBeTruthy();
+    expect(within(card).getAllByText('בדיקה חדשה').length).toBeGreaterThan(0);
+  });
+
+  it('"what now" lists the EL AL verification and the buffer as good news; data survives a reload', async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<App />);
+    const todo = region(/מה עכשיו/);
+    expect(within(todo).getByText(/אימות המחירים של טיסות EL AL/)).toBeTruthy();
+    expect(within(todo).getByText(/buffer של יומיים לפני הקרוז ויום אחרי הקרוז/)).toBeTruthy();
+    await user.click(nav('הזנת נתונים'));
+    await user.click(screen.getByRole('tab', { name: /19\/09/ }));
+    const card = document.querySelector('#card-elal-c2-flex') as HTMLElement;
+    await user.click(within(card).getByRole('button', { name: 'ערוך' }));
+    await user.click(within(card).getByLabelText('השתמש בחישוב לפי נוסעים'));
+    unmount();
+    render(<App />);
+    await user.click(nav('הזנת נתונים'));
+    await user.click(screen.getByRole('tab', { name: /19\/09/ }));
+    const again = document.querySelector('#card-elal-c2-flex') as HTMLElement;
+    expect(strip(again.querySelector('.mini-cost')!.textContent)).toContain('$1,');
+  });
+});

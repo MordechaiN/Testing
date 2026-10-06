@@ -43,7 +43,7 @@ function round(cruiseId: string, patch: Partial<Flight> = {}): Flight {
 describe('EL AL cart from the user (benchmark)', () => {
   it('is in the starting data: group A selected, group B derived and not selected', () => {
     const s = freshState();
-    expect(s.flights.map((f) => [f.id, f.group, f.verified, f.benchmark])).toEqual([
+    expect(s.flights.filter((f) => f.benchmark).map((f) => [f.id, f.group, f.verified, f.benchmark])).toEqual([
       ['bench-elal-A', 'A', true, true],
       ['bench-elal-B', 'B', false, true],
     ]);
@@ -130,7 +130,8 @@ describe('EL AL cart from the user (benchmark)', () => {
   });
 
   it('seeding happens once: a deleted benchmark does not come back', () => {
-    const removed = run(freshState(), { type: 'removeFlight', id: 'bench-elal-A' }, { type: 'removeFlight', id: 'bench-elal-B' });
+    const removed = run(freshState(), ...freshState().flights.map((f) => ({ type: 'removeFlight' as const, id: f.id })));
+    expect(removed.flights).toEqual([]);
     expect(applySeeds(removed).flights).toEqual([]);
     expect(importJson(exportJson(removed))!.flights).toEqual([]);
   });
@@ -138,9 +139,10 @@ describe('EL AL cart from the user (benchmark)', () => {
   it('an older backup (version 2) gets the cart once, without changing its own data', () => {
     const v2 = { ...initialState(), version: 2, seeds: undefined } as unknown as Record<string, unknown>;
     const n = normalizeState(v2)!;
-    expect(n.version).toBe(3);
-    expect(n.flights.map((f) => f.id)).toEqual(['bench-elal-A', 'bench-elal-B']);
-    expect(n.seeds.elAlBenchmark).toBe(true);
+    expect(n.version).toBe(4);
+    expect(n.flights.filter((f) => f.benchmark).map((f) => f.id)).toEqual(['bench-elal-A', 'bench-elal-B']);
+    expect(n.flights.filter((f) => f.fareClass).map((f) => f.id)).toHaveLength(6);
+    expect(n.seeds).toEqual({ elAlBenchmark: true, elAlFares: true });
   });
 });
 

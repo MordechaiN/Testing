@@ -1116,3 +1116,92 @@ textarea.notes {
     color: var(--muted);
   }
 }
+
+/* ---------- EL AL fares, trip options ---------- */
+.block {
+  display: block;
+}
+.fare-table th[scope='row'] {
+  min-width: 130px;
+  color: var(--ink);
+  font-weight: 600;
+  white-space: normal;
+}
+.fare-table td {
+  min-width: 110px;
+  white-space: normal;
+}
+.fare-table .row-info td,
+.fare-table .row-info th {
+  background: #fafbfc;
+  color: var(--muted);
+}
+.fare-compare {
+  margin-bottom: 14px;
+}
+.fare-card h4 {
+  margin: 14px 0 6px;
+}
+.mismatch-box {
+  display: block;
+  margin: 8px 0;
+}
+.price-mode {
+  border: 0;
+  padding: 0;
+  margin: 0 0 8px;
+  display: grid;
+  gap: 6px;
+}
+.history-list {
+  padding-inline-start: 20px;
+  margin: 0 0 10px;
+}
+.stay-hint .readonly {
+  display: inline-block;
+  margin-inline-end: 8px;
+}
+.option-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+}
+.option-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  padding: 14px;
+  min-width: 0;
+}
+.option-card h3 {
+  margin: 0 0 8px;
+}
+.option-timeline {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 10px;
+  display: grid;
+  gap: 4px;
+}
+.fare-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.fare-btn-price {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+.option-table th[scope='row'] {
+  white-space: normal;
+  font-weight: 600;
+  color: var(--ink);
+}
+.good-news {
+  margin: 10px 0 0;
+  color: var(--green);
+}
+.option-table .chip { white-space: normal; max-width: 100%; }

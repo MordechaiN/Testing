@@ -9,7 +9,9 @@ import {
   cruiseVsTrip,
   flightCost,
   flightFullyPriced,
+  flightGroup,
   flightsFor,
+  goodNews,
   hotelNights,
   perAdult,
   rateFlight,
@@ -37,6 +39,7 @@ import type { CSSProperties } from 'react';
 import type { Cruise, Flight, GroupId } from '../domain/types';
 import { Chip, LineValue, NoticeList, StatusBadge, Usd } from './common';
 import { useApp } from './context';
+import { TripOptions } from './TripOptions';
 
 // ---------- the recommendation ----------
 
@@ -127,10 +130,14 @@ const SCREEN_BUTTON = {
 function WhatNow() {
   const { state, go } = useApp();
   const todos = todoList(state);
+  const news = goodNews(state);
   if (todos.length === 0) {
     return (
       <section className="banner banner-green" aria-label="מה עכשיו?">
         <strong>🟢 כל הנתונים העיקריים הוזנו.</strong> אפשר להחליט לפי הטבלאות למטה.
+        {news.map((text) => (
+          <div key={text}>🟢 {text}</div>
+        ))}
       </section>
     );
   }
@@ -149,6 +156,11 @@ function WhatNow() {
           </li>
         ))}
       </ol>
+      {news.map((text) => (
+        <p key={text} className="good-news">
+          🟢 {text}
+        </p>
+      ))}
     </section>
   );
 }
@@ -542,7 +554,7 @@ function Timeline({ cruiseId, group }: { cruiseId: string; group: GroupId }) {
 
 function FlightRow({ flight, selected, onSelect }: { flight: Flight; selected: boolean; onSelect: () => void }) {
   const { state, go } = useApp();
-  const pax = state.passengers[flight.group];
+  const pax = state.passengers[flightGroup(flight)];
   const cost = flightCost(flight, pax);
   const rating = rateFlight(state, flight);
   const dates =
@@ -694,6 +706,7 @@ export function SummaryScreen() {
     <div className="screen">
       <Recommendation />
       <WhatNow />
+      <TripOptions />
       <QuickAnswer />
       {groups.map((g) => (
         <GroupTable key={g} group={g} />

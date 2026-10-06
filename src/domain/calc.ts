@@ -1,4 +1,5 @@
 import { daysBetween, dateName } from './dates';
+import { FARE_RULES } from './fares';
 import { emptyPlan } from './seed';
 import type {
   AppState,
@@ -83,6 +84,15 @@ export interface FlightCost {
   usesCartTotal: boolean;
   /** Per-person prices were typed too, but add up to something else than the cart total. */
   cartMismatch: boolean;
+  /** The price cannot be relied on yet (regular option marked unverified, or a fare record without a usable price). */
+  needsVerification: boolean;
+  /** Fare record: the seat / checked bag is part of the fare, so no extra cost is ever added. */
+  seatIncluded: boolean;
+  baggageIncluded: boolean;
+  /** Fare record: a cost was typed for something the fare already includes – it is ignored. */
+  ignoredExtras: string[];
+  /** Fare record in "verified total" mode: only the party total is known, the split between groups is not. */
+  splitUnknown: boolean;
 }
 
 function rowCents(prices: PersonPrices, slots: PassengerSlot[]): { cents: number; entered: boolean } {
@@ -96,8 +106,141 @@ function rowCents(prices: PersonPrices, slots: PassengerSlot[]): { cents: number
   return { cents, entered };
 }
 
-/** Cost of one flight option for the passengers of a group. Empty = 0, infants pay only if a price was typed. */
-export function flightCost(flight: Flight, pax: Passengers): FlightCost {
+/** The group a regular option belongs to (fare records, shared by both groups, fall back to A). */
+export const flightGroup = (f: Flight): GroupId => (f.group === 'B' ? 'B' : 'A');
+
+export const flightServesGroup = (f: Flight, group: GroupId): boolean => f.group === 'both' || f.group === group;
+
+/** A fare record (EL AL Lite / Classic / Flex): one record shared by both groups, priced per group. */
+export const isFareRecord = (f: Flight): boolean => f.fareClass !== '';
+
+// ----- fare records: displayed price vs. per-passenger breakdown -----
+
+const allFilled = (...v: unknown[]): boolean => v.every(isFilled);
+
+/** Per adult: fare + carrier surcharge + taxes. null while any part is missing. */
+export function adultBreakdownCents(f: Flight): number | null {
+  return allFilled(f.adultFare, f.carrierSurcharge, f.adultTaxes)
+    ? toCents(f.adultFare) + toCents(f.carrierSurcharge) + toCents(f.adultTaxes)
+    : null;
+}
+
+/** Per baby: fare + taxes. null while any part is missing. */
+export function babyBreakdownCents(f: Flight): number | null {
+  return allFilled(f.babyFare, f.babyTaxes) ? toCents(f.babyFare) + toCents(f.babyTaxes) : null;
+}
+
+export interface PriceCheck {
+  /** Both a displayed price and an adult breakdown exist, so they can be compared. */
+  comparable: boolean;
+  /** Compared and NOT matching. The two are never added together and neither is guessed to be right. */
+  mismatch: boolean;
+  displayedSumCents: number | null;
+  adultCents: number | null;
+  babyCents: number | null;
+  /** displayed (out + back) minus the adult breakdown, when both legs were typed. */
+  diffCents: number | null;
+}
+
+/**
+ * Does the price shown next to the flight agree with the per-passenger breakdown?
+ * The displayed price is accepted only when it equals the adult breakdown exactly – as the outbound,
+ * the return, or both legs together (to the cent). Anything else is a contradiction to verify.
+ */
+export function priceCheck(f: Flight): PriceCheck {
+  const adult = adultBreakdownCents(f);
+  const baby = babyBreakdownCents(f);
+  const shown = [f.displayedOut, f.displayedBack].filter(isFilled);
+  const sum = isFilled(f.displayedOut) && isFilled(f.displayedBack) ? toCents(f.displayedOut) + toCents(f.displayedBack) : null;
+  const comparable = adult !== null && shown.length > 0;
+  const candidates = [...shown.map(toCents), ...(sum === null ? [] : [sum])];
+  return {
+    comparable,
+    mismatch: comparable && !candidates.includes(adult),
+    displayedSumCents: sum,
+    adultCents: adult,
+    babyCents: baby,
+    diffCents: sum !== null && adult !== null ? sum - adult : null,
+  };
+}
+
+/** Price of a fare record for ONE group, according to the mode the user chose. A and B never mix. */
+function fareRecordCost(flight: Flight, pax: Passengers, group: GroupId): FlightCost {
+  const rule = FARE_RULES[flight.fareClass as Exclude<typeof flight.fareClass, ''>];
+  const check = priceCheck(flight);
+  const adults = Math.max(0, Math.floor(num(pax.adults)));
+  const infants = Math.max(0, Math.floor(num(pax.infants)));
+  const missing: string[] = [];
+  const infantNotCharged: string[] = [];
+  let fareCents = 0;
+  let usable = false;
+  let splitUnknown = false;
+
+  if (flight.priceMode === 'total') {
+    const mine = flight.verifiedTotal[group];
+    const other = flight.verifiedTotal[group === 'A' ? 'B' : 'A'];
+    if (isFilled(mine)) {
+      fareCents = toCents(mine);
+      usable = true;
+    } else if (isFilled(flight.verifiedTotal.all) && isFilled(other) && toCents(flight.verifiedTotal.all) >= toCents(other)) {
+      // The split is known because the other group's part was typed: this group pays the rest.
+      fareCents = toCents(flight.verifiedTotal.all) - toCents(other);
+      usable = true;
+    } else if (isFilled(flight.verifiedTotal.all)) {
+      splitUnknown = true; // a party total without a known split is never divided by guess
+    }
+  } else if (flight.priceMode === 'breakdown') {
+    if (check.adultCents === null) {
+      if (adults > 0) missing.push('פירוט מבוגר חסר');
+    } else {
+      fareCents += adults * check.adultCents;
+      usable = true;
+    }
+    if (infants > 0) {
+      if (check.babyCents === null) infantNotCharged.push('תינוק');
+      else fareCents += infants * check.babyCents;
+    }
+    if (check.adultCents === null && adults > 0) usable = false;
+  }
+
+  const ignoredExtras: string[] = [];
+  const extra = (row: 'extraSeat' | 'extraBaggage', included: boolean, name: string) => {
+    const v = flight[row][group];
+    if (included) {
+      if (isFilled(v) && v !== 0) ignoredExtras.push(name);
+      return { cents: 0, entered: false };
+    }
+    return { cents: toCents(v), entered: isFilled(v) };
+  };
+  const seats = extra('extraSeat', rule.includesSeat, 'מושב');
+  const bag = extra('extraBaggage', rule.includesBaggage, 'מזוודה');
+
+  return {
+    fare: fromCents(fareCents),
+    seats: fromCents(seats.cents),
+    baggage: fromCents(bag.cents),
+    total: fromCents(fareCents + seats.cents + bag.cents),
+    fareEntered: usable,
+    seatsEntered: seats.entered,
+    baggageEntered: bag.entered,
+    missingAdultFare: missing,
+    infantNotCharged,
+    usesCartTotal: flight.priceMode === 'total',
+    cartMismatch: false,
+    needsVerification: !usable,
+    seatIncluded: rule.includesSeat,
+    baggageIncluded: rule.includesBaggage,
+    ignoredExtras,
+    splitUnknown,
+  };
+}
+
+/**
+ * Cost of one flight option for the passengers of a group. Empty = 0, infants pay only if a price was typed.
+ * `group` matters only for fare records (shared by both groups).
+ */
+export function flightCost(flight: Flight, pax: Passengers, group: GroupId = flightGroup(flight)): FlightCost {
+  if (isFareRecord(flight)) return fareRecordCost(flight, pax, group);
   const slots = passengerSlots(pax);
   const fare = rowCents(flight.fare ?? {}, slots);
   const seats = rowCents(flight.seat ?? {}, slots);
@@ -124,10 +267,16 @@ export function flightCost(flight: Flight, pax: Passengers): FlightCost {
       : slots.filter((s) => s.kind === 'infant' && !isFilled(flight.fare?.[s.id])).map((s) => s.label),
     usesCartTotal,
     cartMismatch: usesCartTotal && perPersonEntered && Math.abs(fare.cents - fareCents) > 1,
+    needsVerification: !flight.verified,
+    seatIncluded: false,
+    baggageIncluded: false,
+    ignoredExtras: [],
+    splitUnknown: false,
   };
 }
 
 export function flightHasPrice(flight: Flight): boolean {
+  if (isFareRecord(flight)) return flight.priceMode !== 'unverified' || adultBreakdownCents(flight) !== null;
   return isFilled(flight.cartTotal) || [flight.fare, flight.seat, flight.baggage].some((row) => Object.values(row ?? {}).some(isFilled));
 }
 
@@ -137,7 +286,7 @@ export function flightFitsSlot(flight: Flight, slot: 'out' | 'back'): boolean {
 }
 
 export function flightsFor(state: AppState, cruiseId: string, group: GroupId, slot: 'out' | 'back'): Flight[] {
-  return state.flights.filter((f) => f.cruiseId === cruiseId && f.group === group && flightFitsSlot(f, slot));
+  return state.flights.filter((f) => f.cruiseId === cruiseId && flightServesGroup(f, group) && flightFitsSlot(f, slot));
 }
 
 export interface Itinerary {
@@ -151,8 +300,8 @@ export interface Itinerary {
 }
 
 /** A flight option is "priced" when every adult fare was typed. */
-export function flightFullyPriced(flight: Flight, pax: Passengers): boolean {
-  const c = flightCost(flight, pax);
+export function flightFullyPriced(flight: Flight, pax: Passengers, group?: GroupId): boolean {
+  const c = flightCost(flight, pax, group);
   return c.fareEntered && c.missingAdultFare.length === 0;
 }
 
@@ -163,9 +312,11 @@ export function flightFullyPriced(flight: Flight, pax: Passengers): boolean {
  */
 export function cheapestItinerary(state: AppState, cruiseId: string, group: GroupId): Itinerary | null {
   const pax = state.passengers[group];
-  const priced = state.flights.filter((f) => f.cruiseId === cruiseId && f.group === group && flightFullyPriced(f, pax));
+  const priced = state.flights.filter(
+    (f) => f.cruiseId === cruiseId && flightServesGroup(f, group) && flightFullyPriced(f, pax, group),
+  );
   const make = (legs: Flight[], oneWayOnly: boolean): Itinerary => {
-    const costs = legs.map((f) => flightCost(f, pax));
+    const costs = legs.map((f) => flightCost(f, pax, group));
     const sum = (k: 'fare' | 'seats' | 'baggage') => fromCents(costs.reduce((t, c) => t + toCents(c[k]), 0));
     return {
       legs,
@@ -177,7 +328,10 @@ export function cheapestItinerary(state: AppState, cruiseId: string, group: Grou
     };
   };
   const cheapest = (list: Flight[]) =>
-    list.reduce<Flight | null>((best, f) => (best === null || flightCost(f, pax).total < flightCost(best, pax).total ? f : best), null);
+    list.reduce<Flight | null>(
+      (best, f) => (best === null || flightCost(f, pax, group).total < flightCost(best, pax, group).total ? f : best),
+      null,
+    );
 
   const candidates: Itinerary[] = priced.filter((f) => f.direction === 'round').map((f) => make([f], false));
   const out = cheapest(priced.filter((f) => f.direction === 'out'));
@@ -372,6 +526,8 @@ export type NoticeCode =
   | 'hotelAfterUndecided'
   | 'unverifiedFlight'
   | 'fareMismatch'
+  | 'priceMismatch'
+  | 'includedExtras'
   | 'sharedHotel'
   | 'sharedItems'
   | 'tips'
@@ -412,7 +568,7 @@ function findFlight(state: AppState, id: string | null, cruiseId: string, group:
   if (!id) return null;
   return (
     state.flights.find(
-      (f) => f.id === id && f.cruiseId === cruiseId && f.group === group && flightFitsSlot(f, slot),
+      (f) => f.id === id && f.cruiseId === cruiseId && flightServesGroup(f, group) && flightFitsSlot(f, slot),
     ) ?? null
   );
 }
@@ -470,8 +626,11 @@ export function computePlan(state: AppState, cruiseId: string, group: GroupId, r
   const legs: { flight: Flight; name: string }[] = [];
   if (out) legs.push({ flight: out, name: roundTrip ? 'הלוך-חזור' : 'הלוך' });
   if (back) legs.push({ flight: back, name: 'חזור' });
+  let flightLabelText: string | undefined;
+  let seatsLabel: string | undefined;
+  let baggageLabel: string | undefined;
   for (const { flight, name } of legs) {
-    const c = flightCost(flight, pax);
+    const c = flightCost(flight, pax, group);
     fare += toCents(c.fare);
     seats += toCents(c.seats);
     baggage += toCents(c.baggage);
@@ -481,7 +640,37 @@ export function computePlan(state: AppState, cruiseId: string, group: GroupId, r
     if (c.missingAdultFare.length > 0) {
       notices.push({ code: 'fare', severity: 'yellow', text: `חסר מחיר טיסה (${name}): ${c.missingAdultFare.join(', ')}` });
     }
-    if (!flight.verified) {
+    if (isFareRecord(flight)) {
+      const cls = FARE_RULES[flight.fareClass as Exclude<typeof flight.fareClass, ''>].label;
+      const check = priceCheck(flight);
+      if (c.needsVerification) {
+        flightLabelText = 'נדרש אימות מחיר';
+        notices.push({
+          code: 'unverifiedFlight',
+          severity: 'yellow',
+          text: c.splitUnknown
+            ? `⚠️ נדרש אימות מחיר (EL AL ${cls}): הוזן מחיר כולל לכל הנוסעים, אבל לא ידוע איך הוא מתחלק בין A ל-B`
+            : check.mismatch
+              ? `⚠️ נדרש אימות מחיר (EL AL ${cls}): המחיר שהוצג והפירוט לנוסע לא תואמים – לא נספר בסיכום`
+              : `⚠️ נדרש אימות מחיר (EL AL ${cls}): לא נבחר מחיר לחישוב – לא נספר בסיכום`,
+        });
+      } else if (flight.priceMode === 'breakdown' && check.mismatch) {
+        notices.push({
+          code: 'priceMismatch',
+          severity: 'yellow',
+          text: `EL AL ${cls}: החישוב לפי פירוט הנוסעים, אבל המחיר שהוצג שונה – כדאי לבדוק מול EL AL`,
+        });
+      }
+      if (c.ignoredExtras.length > 0) {
+        notices.push({
+          code: 'includedExtras',
+          severity: 'blue',
+          text: `EL AL ${cls}: ${c.ignoredExtras.join(' ו')} כלולים בתעריף – העלות שהוזנה לא נספרה (בלי כפל)`,
+        });
+      }
+      if (c.seatIncluded) seatsLabel = 'כלול בתעריף';
+      if (c.baggageIncluded) baggageLabel = 'כלולה בתעריף';
+    } else if (c.needsVerification) {
       notices.push({
         code: 'unverifiedFlight',
         severity: 'yellow',
@@ -508,9 +697,13 @@ export function computePlan(state: AppState, cruiseId: string, group: GroupId, r
   else if (!roundTrip && !back) notices.push({ code: 'flight', severity: 'yellow', text: 'חסרה טיסת חזור' });
 
   // A selected flight without any typed fare is still "not entered", never "$0".
-  lines.flights = { amount: fromCents(fare), entered: fareEntered };
-  lines.seats = { amount: fromCents(seats), entered: seatsEntered };
-  lines.baggage = { amount: fromCents(baggage), entered: baggageEntered };
+  lines.flights = { amount: fromCents(fare), entered: fareEntered, ...(flightLabelText && !fareEntered ? { label: flightLabelText } : {}) };
+  lines.seats = seatsLabel
+    ? { amount: 0, entered: true, label: seatsLabel }
+    : { amount: fromCents(seats), entered: seatsEntered };
+  lines.baggage = baggageLabel
+    ? { amount: 0, entered: true, label: baggageLabel }
+    : { amount: fromCents(baggage), entered: baggageEntered };
 
   // Hotel before the cruise
   lines.hotel = hotelLine(hotel, plan.noHotel, 'before');
@@ -757,7 +950,7 @@ export function todoList(state: AppState): Todo[] {
   for (const c of state.cruises) {
     const name = dateName(c.start);
     // Options are per group: a group with no flight options must be told to check flights.
-    const groupsWithout = groups.filter((g) => !state.flights.some((f) => f.cruiseId === c.id && f.group === g));
+    const groupsWithout = groups.filter((g) => !state.flights.some((f) => f.cruiseId === c.id && flightServesGroup(f, g)));
     const datePlans = plans.filter((p) => p.cruiseId === c.id);
     if (groupsWithout.length > 0) {
       const who = groupsWithout.length === groups.length ? '' : ` (${groupsWithout.map((g) => `קבוצה ${g}`).join(', ')})`;
@@ -768,7 +961,21 @@ export function todoList(state: AppState): Todo[] {
       todos.push({ id: `fare-${c.id}`, text: `השלימו מחיר טיסה ל-${name}`, screen: 'entry' });
     }
   }
-  if (plans.some((p) => hasNotice(p, 'unverifiedFlight'))) {
+  const faresToVerify = state.flights.filter(
+    (f) => isFareRecord(f) && groups.some((g) => flightCost(f, state.passengers[g], g).needsVerification),
+  );
+  if (faresToVerify.length > 0) {
+    const mismatched = faresToVerify.filter((f) => priceCheck(f).mismatch).length;
+    todos.push({
+      id: 'verify-elal',
+      text:
+        mismatched > 0
+          ? `אימות המחירים של טיסות EL AL – קיימת אי-התאמה בין מחיר התצוגה לפירוט (${mismatched} מתוך ${state.flights.filter(isFareRecord).length} תעריפים)`
+          : 'אימות המחירים של טיסות EL AL – לא נבחר מחיר לחישוב',
+      screen: 'entry',
+    });
+  }
+  if (plans.some((p) => [p.out, p.back].some((f) => f !== null && !isFareRecord(f) && !f.verified))) {
     todos.push({ id: 'verify-flights', text: 'אמתו מחיר טיסה באתר חברת התעופה (המחיר שנבחר לא מאומת)', screen: 'entry' });
   }
   if (plans.some((p) => hasNotice(p, 'hotelCurrency'))) {
@@ -793,6 +1000,24 @@ export function todoList(state: AppState): Todo[] {
   return todos;
 }
 
+/** Good news shown in green under "מה עכשיו?": the flight dates leave a buffer around the cruise. */
+export function goodNews(state: AppState): string[] {
+  const lines: { key: string; out: number; back: number; name: string }[] = [];
+  for (const c of state.cruises) {
+    const o = tripOption(state, c.id);
+    if (!o.flight) continue;
+    const out = daysBetween(o.flight.date, c.start);
+    const back = daysBetween(c.end, o.flight.returnDate || (o.flight.direction === 'back' ? o.flight.date : ''));
+    if (out === null || back === null || out < 1 || back < 1) continue;
+    lines.push({ key: `${out}-${back}`, out, back, name: dateName(c.start) });
+  }
+  if (lines.length === 0) return [];
+  const text = (l: { out: number; back: number }) =>
+    `תאריכי הטיסות נותנים buffer של ${daysWord(l.out)} לפני הקרוז ו${daysWord(l.back)} אחרי הקרוז`;
+  if (lines.every((l) => l.key === lines[0]!.key) && lines.length === state.cruises.length) return [text(lines[0]!)];
+  return lines.map((l) => `${l.name}: ${text(l)}`);
+}
+
 // ---------- included / not included ----------
 
 export interface InclusionItem {
@@ -809,7 +1034,7 @@ export function inclusionList(state: AppState): { included: InclusionItem[]; not
     { text: 'חבילת משקאות (אופציונלי)', severity: 'blue' },
     { text: 'אינטרנט (אופציונלי)', severity: 'blue' },
   ];
-  if (!state.flights.some((f) => groups.includes(f.group))) notIncluded.push({ text: 'טיסות – עדיין לא נבדקו', severity: 'yellow' });
+  if (!state.flights.some((f) => groups.some((g) => flightServesGroup(f, g)))) notIncluded.push({ text: 'טיסות – עדיין לא נבדקו', severity: 'yellow' });
   else notIncluded.push({ text: 'טיסות – מוזנות בנפרד', severity: 'blue' });
   const anyHotelPriced = plans.some((p) => p.lines.hotel.entered && !p.lines.hotel.label);
   const allNoHotel = plans.length > 0 && plans.every((p) => p.lines.hotel.label);
@@ -874,22 +1099,29 @@ function isDirect(f: Flight): boolean {
  * Verified, fully priced options of the same kind: round trips with round trips, one-ways with one-ways,
  * and direct flights with direct flights (a flight with a stop is naturally cheaper and is judged on its own).
  */
-function priceComparables(state: AppState, flight: Flight): Flight[] {
-  const pax = state.passengers[flight.group];
+function priceComparables(state: AppState, flight: Flight, group: GroupId): Flight[] {
+  const pax = state.passengers[group];
   return state.flights.filter(
     (f) =>
       f.cruiseId === flight.cruiseId &&
-      f.group === flight.group &&
+      flightServesGroup(f, group) &&
       f.direction === flight.direction &&
       isDirect(f) === isDirect(flight) &&
-      f.verified &&
-      flightFullyPriced(f, pax),
+      isVerifiedFor(f, pax, group) &&
+      flightFullyPriced(f, pax, group),
   );
 }
 
-export function rateFlight(state: AppState, flight: Flight): FlightRating {
+/** A usable, trusted price for this group (regular option: marked verified; fare record: a price mode was chosen). */
+export function isVerifiedFor(f: Flight, pax: Passengers, group: GroupId): boolean {
+  return !flightCost(f, pax, group).needsVerification;
+}
+
+export function rateFlight(state: AppState, flight: Flight, forGroup?: GroupId): FlightRating {
   const cruise = state.cruises.find((c) => c.id === flight.cruiseId);
-  const pax = state.passengers[flight.group];
+  const group: GroupId = forGroup ?? flightGroup(flight);
+  const pax = state.passengers[group];
+  const verified = isVerifiedFor(flight, pax, group);
   const legs = flightLegs(flight);
   const bad: string[] = [];
   const compromise: string[] = [];
@@ -933,10 +1165,10 @@ export function rateFlight(state: AppState, flight: Flight): FlightRating {
 
   // Price relative to the other verified options
   let goodPrice = false;
-  const comparables = priceComparables(state, flight);
-  if (flight.verified && flightFullyPriced(flight, pax) && comparables.length >= 2) {
-    const mine = flightCost(flight, pax).total;
-    const cheapest = Math.min(...comparables.map((f) => flightCost(f, pax).total));
+  const comparables = priceComparables(state, flight, group);
+  if (verified && flightFullyPriced(flight, pax, group) && comparables.length >= 2) {
+    const mine = flightCost(flight, pax, group).total;
+    const cheapest = Math.min(...comparables.map((f) => flightCost(f, pax, group).total));
     if (cheapest > 0) {
       const ratio = mine / cheapest;
       if (ratio > 1.5) bad.push('מחיר חריג – יקרה ב-50% ויותר מהאפשרות הזולה');
@@ -945,23 +1177,23 @@ export function rateFlight(state: AppState, flight: Flight): FlightRating {
     }
   }
   // A flight with a stop can be much cheaper than the direct one – say so, but it stays a compromise.
-  if (!isDirect(flight) && flight.verified && flightFullyPriced(flight, pax)) {
+  if (!isDirect(flight) && verified && flightFullyPriced(flight, pax, group)) {
     const directs = state.flights.filter(
       (f) =>
         f.cruiseId === flight.cruiseId &&
-        f.group === flight.group &&
+        flightServesGroup(f, group) &&
         f.direction === flight.direction &&
         isDirect(f) &&
-        f.verified &&
-        flightFullyPriced(f, pax),
+        isVerifiedFor(f, pax, group) &&
+        flightFullyPriced(f, pax, group),
     );
     if (directs.length > 0) {
-      const cheapestDirect = Math.min(...directs.map((f) => flightCost(f, pax).total));
-      const diff = Math.round((cheapestDirect - flightCost(flight, pax).total) * 100) / 100;
+      const cheapestDirect = Math.min(...directs.map((f) => flightCost(f, pax, group).total));
+      const diff = Math.round((cheapestDirect - flightCost(flight, pax, group).total) * 100) / 100;
       if (diff > 0) compromise.push(`זולה ב-$${diff.toLocaleString('en-US')} מהישירה, אבל פחות נוחה`);
     }
   }
-  if (!flight.verified) compromise.push('מחיר לא מאומת');
+  if (!verified) compromise.push('מחיר לא מאומת');
 
   let level: RatingLevel;
   let reasons: string[];
@@ -1077,6 +1309,16 @@ const MISSING_BY_CODE: [NoticeCode[], string][] = [
   [['fee'], 'עמלה'],
 ];
 
+/** What is still missing in a plan, as short words ("מלון", "טיפים"…) – for "חלקי" labels. */
+export function missingItems(r: PlanResult): string[] {
+  const out: string[] = [];
+  for (const [codes, label] of MISSING_BY_CODE) {
+    if (label === 'חדר') continue;
+    if (codes.some((code) => hasNotice(r, code)) && !out.includes(label)) out.push(label);
+  }
+  return out;
+}
+
 export function recommendation(state: AppState, group: GroupId): Recommendation {
   const cmp = compareDates(state, group);
   const none: Recommendation = { status: 'none', cruiseId: null, index: null, reasons: [], missing: [], cautions: [] };
@@ -1133,4 +1375,194 @@ export function recommendation(state: AppState, group: GroupId): Recommendation 
     if (tripDiff > 0) reasons.push(`כל הטיול זול ב-$${(tripDiff / 100).toLocaleString('en-US')}`);
   }
   return { status: 'recommend', cruiseId: pick.c.cruise.id, index: pick.i, reasons, missing: [], cautions };
+}
+
+// ---------- EL AL fares: comparison table (Lite / Classic / Flex) ----------
+
+const dollars = (cents: number): string =>
+  `$${(cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+export interface FareColumn {
+  fareClass: 'lite' | 'classic' | 'flex';
+  flight: Flight | null;
+  check: PriceCheck | null;
+  /** Price used for each group (null = not usable yet: unverified / split unknown). */
+  cost: Record<GroupId, FlightCost | null>;
+  /** A = 2 × adult + baby, B = 2 × adult – from the breakdown, for checking only (never added to anything). */
+  breakdownCents: Record<GroupId, number | null>;
+  /** Whole party (all adults + all babies) by the breakdown. */
+  breakdownAllCents: number | null;
+  /** Extra cost compared with Lite, per group. null = cannot be computed from verified prices. */
+  deltaVsLite: Record<GroupId, number | null>;
+}
+
+export interface FareLadder {
+  cruiseId: string;
+  columns: FareColumn[];
+  /** Data oddities found automatically (shown, never "fixed"). */
+  issues: string[];
+}
+
+export function fareLadder(state: AppState, cruiseId: string): FareLadder {
+  const cruise = state.cruises.find((c) => c.id === cruiseId);
+  const classes = ['lite', 'classic', 'flex'] as const;
+  const columns: FareColumn[] = classes.map((fareClass) => {
+    const flight = state.flights.find((f) => f.cruiseId === cruiseId && f.fareClass === fareClass) ?? null;
+    const cost = { A: null, B: null } as Record<GroupId, FlightCost | null>;
+    const breakdownCents = { A: null, B: null } as Record<GroupId, number | null>;
+    let all: number | null = null;
+    if (flight) {
+      const check = priceCheck(flight);
+      for (const g of GROUP_IDS) {
+        const c = flightCost(flight, state.passengers[g], g);
+        cost[g] = c.needsVerification ? null : c;
+        const pax = state.passengers[g];
+        const adults = Math.max(0, pax.adults);
+        const infants = Math.max(0, pax.infants);
+        breakdownCents[g] =
+          check.adultCents === null || (infants > 0 && check.babyCents === null)
+            ? null
+            : adults * check.adultCents + infants * (check.babyCents ?? 0);
+      }
+      all = breakdownCents.A !== null && breakdownCents.B !== null ? breakdownCents.A + breakdownCents.B : null;
+    }
+    return {
+      fareClass,
+      flight,
+      check: flight ? priceCheck(flight) : null,
+      cost,
+      breakdownCents,
+      breakdownAllCents: all,
+      deltaVsLite: { A: null, B: null },
+    };
+  });
+  const lite = columns[0]!;
+  for (const col of columns) {
+    for (const g of GROUP_IDS) {
+      const mine = col.cost[g];
+      const base = lite.cost[g];
+      col.deltaVsLite[g] = col === lite || !mine || !base ? null : fromCents(toCents(mine.total) - toCents(base.total));
+    }
+  }
+
+  const issues: string[] = [];
+  const name = cruise ? dateName(cruise.start) : cruiseId;
+  const adult = (c: FareColumn) => (c.flight ? priceCheck(c.flight).adultCents : null);
+  const [l, c, f] = [adult(columns[0]!), adult(columns[1]!), adult(columns[2]!)];
+  if (l !== null && c !== null && l > c) {
+    issues.push(`${name}: פירוט המבוגר ב-Lite (${dollars(l)}) גבוה מ-Classic (${dollars(c)}) – חריג, ייתכן שיש טעות בהזנה. לא תוקן.`);
+  }
+  if (c !== null && f !== null && c > f) {
+    issues.push(`${name}: פירוט המבוגר ב-Classic (${dollars(c)}) גבוה מ-Flex (${dollars(f)}) – חריג. לא תוקן.`);
+  }
+  if (l !== null && f !== null && l > f) {
+    issues.push(`${name}: פירוט המבוגר ב-Lite (${dollars(l)}) גבוה מ-Flex (${dollars(f)}) – חריג. לא תוקן.`);
+  }
+  return { cruiseId, columns, issues: [...new Set(issues)] };
+}
+
+// ---------- hotel nights from the flight dates ----------
+
+/** Hotel stay implied by a flight: arrival → cruise start (before), cruise end → flight home (after). */
+export function stayFromFlight(cruise: Cruise, flight: Flight, phase: 'before' | 'after'): { checkIn: string; checkOut: string } | null {
+  if (phase === 'before') {
+    if (!flight.date) return null;
+    const n = daysBetween(flight.date, cruise.start);
+    return n !== null && n > 0 ? { checkIn: flight.date, checkOut: cruise.start } : null;
+  }
+  const home = flight.direction === 'back' ? flight.date : flight.returnDate;
+  if (!home) return null;
+  const n = daysBetween(cruise.end, home);
+  return n !== null && n > 0 ? { checkIn: cruise.end, checkOut: home } : null;
+}
+
+const GROUP_IDS: readonly GroupId[] = ['A', 'B'];
+
+/** The flight the plan of a group uses for this phase (outbound for "before", the way home for "after"). */
+function selectedFlightFor(state: AppState, cruiseId: string, group: GroupId, phase: 'before' | 'after'): Flight | null {
+  const plan = state.plans[cruiseId]?.[group];
+  if (!plan) return null;
+  const out = findFlight(state, plan.outFlightId, cruiseId, group, 'out');
+  if (phase === 'before') return out;
+  if (out?.direction === 'round') return out;
+  return findFlight(state, plan.backFlightId, cruiseId, group, 'back');
+}
+
+/**
+ * Dates of the planned hotel stay for a cruise, derived from the selected flight (or, before any flight is
+ * selected, from the EL AL fare records of that date). null = not derivable. The user can always edit the dates.
+ */
+export function plannedStay(
+  state: AppState,
+  cruiseId: string,
+  owner: Owner,
+  phase: 'before' | 'after',
+): { checkIn: string; checkOut: string } | null {
+  const cruise = state.cruises.find((c) => c.id === cruiseId);
+  if (!cruise) return null;
+  const groups: GroupId[] = owner === 'both' ? activeGroups(state) : [owner];
+  for (const g of groups) {
+    const f = selectedFlightFor(state, cruiseId, g, phase);
+    const stay = f ? stayFromFlight(cruise, f, phase) : null;
+    if (stay) return stay;
+  }
+  for (const f of state.flights) {
+    if (f.cruiseId !== cruiseId || !isFareRecord(f)) continue;
+    const stay = stayFromFlight(cruise, f, phase);
+    if (stay) return stay;
+  }
+  return null;
+}
+
+// ---------- one trip option, as shown on the summary ----------
+
+export interface StayInfo {
+  checkIn: string;
+  checkOut: string;
+  nights: number;
+  /** 'hotel' = dates of the hotel the user selected; 'flight' = derived from the flight dates (not yet a hotel). */
+  source: 'hotel' | 'flight';
+  hotelName: string;
+}
+
+export interface TripOption {
+  cruise: Cruise;
+  /** The selected flight, otherwise the EL AL fare record of that date. */
+  flight: Flight | null;
+  flightSelected: boolean;
+  before: StayInfo | null;
+  after: StayInfo | null;
+}
+
+export function tripOption(state: AppState, cruiseId: string): TripOption {
+  const cruise = state.cruises.find((c) => c.id === cruiseId)!;
+  const groups = activeGroups(state);
+  let flight: Flight | null = null;
+  let flightSelected = false;
+  for (const g of groups) {
+    const f = selectedFlightFor(state, cruiseId, g, 'before');
+    if (f) {
+      flight = f;
+      flightSelected = true;
+      break;
+    }
+  }
+  if (!flight) flight = state.flights.find((f) => f.cruiseId === cruiseId && isFareRecord(f)) ?? null;
+
+  const stay = (phase: 'before' | 'after'): StayInfo | null => {
+    for (const g of groups) {
+      const plan = state.plans[cruiseId]?.[g];
+      const id = phase === 'before' ? plan?.hotelId : plan?.hotelAfterId;
+      const h = id ? state.hotels.find((x) => x.id === id) : undefined;
+      if (h && h.checkIn && h.checkOut) {
+        const n = daysBetween(h.checkIn, h.checkOut);
+        if (n !== null && n > 0) return { checkIn: h.checkIn, checkOut: h.checkOut, nights: n, source: 'hotel', hotelName: h.name };
+      }
+    }
+    const planned = plannedStay(state, cruiseId, 'both', phase);
+    if (!planned) return null;
+    const n = daysBetween(planned.checkIn, planned.checkOut);
+    return n === null ? null : { ...planned, nights: n, source: 'flight', hotelName: '' };
+  };
+  return { cruise, flight, flightSelected, before: stay('before'), after: stay('after') };
 }

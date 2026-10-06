@@ -1,6 +1,7 @@
 import { ltr, shortDate } from './dates';
 import type { Currency, Flight, GroupId, Hotel, Owner, Passengers } from './types';
 import { flightCost, hotelNativeCost } from './calc';
+import { FARE_CLASS_LABEL } from './fares';
 
 /** 4805 -> "4,805", 1234.5 -> "1,234.50" */
 export function fmt(n: number): string {
@@ -44,7 +45,8 @@ export const DIRECTION_LABEL = {
 } as const;
 
 export function flightLabel(f: Flight): string {
-  const name = [f.airline.trim(), f.flightNo.trim()].filter(Boolean).join(' ');
+  const fareName = f.fareClass ? FARE_CLASS_LABEL[f.fareClass] : '';
+  const name = [f.airline.trim(), fareName, f.flightNo.trim()].filter(Boolean).join(' ');
   return name || 'טיסה (ללא שם)';
 }
 
@@ -63,8 +65,9 @@ export function flightDetails(f: Flight): string {
 
 /** Price shown next to a flight option: the fare only (seats/baggage are separate lines), or "חסר מחיר". */
 export function flightPriceText(f: Flight, pax: Passengers): string {
-  const c = flightCost(f, pax);
-  if (!c.fareEntered) return 'חסר מחיר';
+  const group: GroupId = f.group === 'B' ? 'B' : 'A';
+  const c = flightCost(f, pax, group);
+  if (!c.fareEntered) return f.fareClass ? 'נדרש אימות מחיר' : 'חסר מחיר';
   return `טיסה ${usd(c.fare)}${c.missingAdultFare.length > 0 ? ' (חלקי)' : ''}`;
 }
 

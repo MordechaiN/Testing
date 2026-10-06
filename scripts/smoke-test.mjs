@@ -183,6 +183,38 @@ await step('3b. The EL AL cart is part of the starting data', async () => {
   await page.getByRole('button', { name: 'איפוס לנתונים ההתחלתיים' }).count();
 });
 
+await step('3c. EL AL fares: options, Lite/Classic/Flex, mismatch warning, price modes', async () => {
+  const trip = page.locator('section[aria-label="אפשרויות הטיול"]');
+  const opt2 = trip.locator('article[aria-label="אפשרות 2"]');
+  const t2 = strip(await opt2.textContent());
+  check(t2.includes('17/09 → 27/09') && t2.includes('14:10'), 'Option 2 shows the flight dates 17/09 → 27/09');
+  check(t2.includes('🏨') && t2.includes('🚢') && t2.includes('Total'), 'Option 2 shows hotel, cruise and Total');
+  check(t2.includes('A · זוג + תינוק') && t2.includes('B · זוג'), 'Option 2 has a separate column for A and for B');
+  const now = strip(await page.locator('section[aria-label="מה עכשיו?"]').textContent());
+  check(now.includes('אימות המחירים של טיסות EL AL') && now.includes('אי-התאמה'), '"What now" asks to verify the EL AL prices');
+  check(now.includes('buffer של יומיים לפני הקרוז ויום אחרי הקרוז'), '"What now" shows the buffer as good news');
+  await nav(page, 'הזנת נתונים').click();
+  const table = page.locator('.fare-table').first();
+  const tt = strip(await table.textContent());
+  check(tt.includes('Lite') && tt.includes('Classic') && tt.includes('Flex'), 'fare table has Lite / Classic / Flex');
+  check(tt.includes('$262 / $178') && tt.includes('249 + 120 + 69.88 = $438.88'), 'displayed price and breakdown shown separately');
+  check(tt.includes('נדרש אימות מחיר'), 'warning "נדרש אימות מחיר" is shown');
+  const card = page.locator('#card-elal-c1-lite');
+  await card.getByRole('button', { name: 'ערוך' }).click();
+  await card.getByLabel('השתמש בחישוב לפי נוסעים').check();
+  const costs = strip(await card.locator('.mini-cost').textContent());
+  check(costs.includes('$959.96') && costs.includes('$877.76'), `A = 2 adults + baby = $959.96, B = 2 adults = $877.76 (${costs})`);
+  await nav(page, 'סיכום והשוואה').click();
+  const opt1 = page.locator('section[aria-label="אפשרויות הטיול"] article[aria-label="אפשרות 1"]');
+  await opt1.getByRole('button', { name: /^Lite/ }).click();
+  const t1 = strip(await opt1.textContent());
+  check(t1.includes('$959.96') || t1.includes('$877.76'), 'the chosen fare is counted per group on the summary');
+  // put it back to "unverified" so the next steps start from the same state
+  await nav(page, 'הזנת נתונים').click();
+  await page.locator('#card-elal-c1-lite').getByRole('button', { name: 'ערוך' }).click();
+  await page.locator('#card-elal-c1-lite').getByLabel('לא מאומת').check();
+});
+
 await step('4. Full scenario entered through the UI', async () => {
   await nav(page, 'הזנת נתונים').click();
   // Start from an empty trip: delete the two EL AL cart records (also tests deleting).
@@ -308,7 +340,12 @@ await step('7. Details screen, export and import', async () => {
   const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'ייצוא נתונים (JSON)' }).click()]);
   backupPath = await download.path();
   const data = JSON.parse(readFileSync(backupPath, 'utf8'));
-  check(data.version === 3 && data.flights.length === 3 && data.hotels.length === 2, 'export: JSON with all flights and hotels');
+  check(
+    data.version === 4 && data.flights.filter((f) => !f.fareClass).length === 3 && data.hotels.length === 2,
+    'export: JSON with all flights and hotels',
+  );
+  const kept = data.flights.filter((f) => f.fareClass);
+  check(kept.length === 3 && kept.every((f) => f.displayedOut !== null && f.adultFare !== null), 'export: the EL AL fare records keep displayed price and breakdown');
 
   await page.getByRole('button', { name: 'איפוס לנתונים ההתחלתיים' }).click();
   await nav(page, 'סיכום והשוואה').click();

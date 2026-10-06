@@ -113,7 +113,7 @@ describe('migration from version 1 (data is never lost)', () => {
   // B: 4780 + out (2×300 + 2×25 + 2×60 + 2×5 = 780) + hotel 400 (full) + drinks 30 = 5,990
   it('keeps every total exactly as it was', () => {
     const s = normalizeState(v1)!;
-    expect(s.version).toBe(3);
+    expect(s.version).toBe(4);
     expect(computePlan(s, 'c1', 'A').total).toBe(6995);
     expect(computePlan(s, 'c1', 'B').total).toBe(5990);
   });
@@ -140,7 +140,7 @@ describe('migration from version 1 (data is never lost)', () => {
   it('a v1 save in localStorage is migrated on load to the current version', () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(v1));
     const loaded = loadState();
-    expect(loaded.version).toBe(3);
+    expect(loaded.version).toBe(4);
     expect(computePlan(loaded, 'c1', 'A').total).toBe(6995);
   });
 });
@@ -175,6 +175,15 @@ describe('dates', () => {
 
   it('the test helper fresh() is the base state without the built-in EL AL cart', () => {
     expect(fresh().flights).toEqual([]);
-    expect(freshState().flights.map((f) => f.id)).toEqual(['bench-elal-A', 'bench-elal-B']);
+    expect(freshState().flights.map((f) => f.id)).toEqual([
+      'bench-elal-A',
+      'bench-elal-B',
+      'elal-c1-lite',
+      'elal-c2-lite',
+      'elal-c1-classic',
+      'elal-c2-classic',
+      'elal-c1-flex',
+      'elal-c2-flex',
+    ]);
   });
 });

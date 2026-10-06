@@ -16,7 +16,7 @@ import type {
 export const run = (state: AppState, ...actions: Action[]): AppState => actions.reduce(reducer, state);
 
 /** The base data (12 prices + terms) WITHOUT the built-in EL AL cart, so scenarios start from an empty trip. */
-export const fresh = (): AppState => ({ ...initialState(), seeds: { elAlBenchmark: true } });
+export const fresh = (): AppState => ({ ...initialState(), seeds: { elAlBenchmark: true, elAlFares: true } });
 
 export function flight(cruiseId: string, group: GroupId, direction: FlightDirection, patch: Partial<Flight> = {}): Flight {
   return { ...emptyFlight(cruiseId, group, direction), ...patch };

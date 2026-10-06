@@ -1,9 +1,11 @@
 import { passengerSlots } from './calc';
+import { isFareClass } from './fares';
 import { applySeeds, emptyFlight, emptyHotel, emptyPlan, freshState, initialState, initialTerms, plansFor } from './seed';
 import type {
   AppState,
   Cruise,
   ExtraItem,
+  FareCheck,
   Flight,
   GroupId,
   Hotel,
@@ -211,12 +213,39 @@ function migrateV1(raw: Obj): Obj | null {
 
 // ---------- v2 normalisation ----------
 
+function perGroup(raw: unknown): Record<GroupId, Money> {
+  const r = isObject(raw) ? raw : {};
+  return { A: money(r.A), B: money(r.B) };
+}
+
+function checkFrom(c: unknown): FareCheck | null {
+  if (!isObject(c)) return null;
+  return {
+    id: str(c.id) || `chk_${Math.random().toString(36).slice(2, 8)}`,
+    checkedAt: str(c.checkedAt),
+    source: str(c.source),
+    note: str(c.note),
+    displayedOut: money(c.displayedOut),
+    displayedBack: money(c.displayedBack),
+    adultFare: money(c.adultFare),
+    carrierSurcharge: money(c.carrierSurcharge),
+    adultTaxes: money(c.adultTaxes),
+    babyFare: money(c.babyFare),
+    babyTaxes: money(c.babyTaxes),
+  };
+}
+
 function flightFrom(f: Obj): Flight | null {
-  if (typeof f.id !== 'string' || (f.group !== 'A' && f.group !== 'B')) return null;
+  if (typeof f.id !== 'string') return null;
+  const fareClass = isFareClass(f.fareClass) ? f.fareClass : '';
+  // Only fare records may be shared; a regular option always belongs to one group.
+  const group = f.group === 'A' || f.group === 'B' ? f.group : f.group === 'both' && fareClass ? 'both' : null;
+  if (group === null) return null;
+  const vt = isObject(f.verifiedTotal) ? f.verifiedTotal : {};
   return {
     id: f.id,
     cruiseId: str(f.cruiseId),
-    group: f.group,
+    group,
     direction: f.direction === 'back' ? 'back' : f.direction === 'round' ? 'round' : 'out',
     airline: str(f.airline),
     flightNo: str(f.flightNo),
@@ -249,6 +278,20 @@ function flightFrom(f: Obj): Flight | null {
     verified: f.verified !== false,
     benchmark: f.benchmark === true,
     notes: str(f.notes),
+    fareClass,
+    searchedFor: str(f.searchedFor),
+    displayedOut: money(f.displayedOut),
+    displayedBack: money(f.displayedBack),
+    adultFare: money(f.adultFare),
+    carrierSurcharge: money(f.carrierSurcharge),
+    adultTaxes: money(f.adultTaxes),
+    babyFare: money(f.babyFare),
+    babyTaxes: money(f.babyTaxes),
+    priceMode: f.priceMode === 'total' || f.priceMode === 'breakdown' ? f.priceMode : 'unverified',
+    verifiedTotal: { all: money(vt.all), A: money(vt.A), B: money(vt.B) },
+    extraSeat: perGroup(f.extraSeat),
+    extraBaggage: perGroup(f.extraBaggage),
+    history: Array.isArray(f.history) ? f.history.map(checkFrom).filter((c): c is FareCheck => c !== null) : [],
   };
 }
 
@@ -307,8 +350,8 @@ export function normalizeState(input: unknown): AppState | null {
   if (!isObject(input)) return null;
   let raw: Obj | null = input;
   if (raw.version === 1) raw = migrateV1(raw);
-  // Version 2 saves are read by the same code: the fields added in version 3 get safe defaults below.
-  if (!raw || (raw.version !== 2 && raw.version !== 3)) return null;
+  // Version 2 and 3 saves are read by the same code: the fields added later get safe defaults below.
+  if (!raw || (raw.version !== 2 && raw.version !== 3 && raw.version !== 4)) return null;
 
   const cs = cruises(raw.cruises);
   if (!cs || !Array.isArray(raw.flights) || !Array.isArray(raw.hotels)) return null;
@@ -338,7 +381,7 @@ export function normalizeState(input: unknown): AppState | null {
 
   const seeds = isObject(raw.seeds) ? raw.seeds : {};
   return applySeeds({
-    version: 3,
+    version: 4,
     groupBEnabled: raw.groupBEnabled !== false,
     passengers: {
       A: passengers(rawPassengers.A, base.passengers.A),
@@ -355,7 +398,7 @@ export function normalizeState(input: unknown): AppState | null {
     deposit: { A: money(dep.A), B: money(dep.B) },
     terms,
     notes: str(raw.notes),
-    seeds: { elAlBenchmark: seeds.elAlBenchmark === true },
+    seeds: { elAlBenchmark: seeds.elAlBenchmark === true, elAlFares: seeds.elAlFares === true },
   });
 }
 
